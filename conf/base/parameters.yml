@@ -1,0 +1,111 @@
+# ==================================================
+# PARAMETERS — Energy Market Analyzer
+# ==================================================
+# All project hyperparameters live here.
+# To change country: modify ingestion.country
+# To change period: modify ingestion.start_date/end_date
+# ==================================================
+
+
+# --- Ingestion ---
+ingestion:
+  country: "BE"
+  start_date: "2015-01-01"
+  end_date: "2026-03-31"
+  neighbors:
+    - "FR"
+    - "NL"
+    - "DE_LU"
+  forward_fill_max_days: 3
+  retry_max_attempts: 3
+  retry_backoff_factor: 2
+
+
+# --- Features ---
+features:
+  rolling_windows:
+    short: 24      # 1 day
+    medium: 168    # 1 week
+    long: 720      # 1 month
+  spark_spread:
+    heat_rate: 2.0  # Typical CCGT efficiency (simplified)
+
+
+# --- HMM (Hidden Markov Model) ---
+hmm:
+  n_states: 3           # calm, volatile, crisis
+  n_init: 50            # Number of initializations for convergence
+  covariance_type: "full"  # "full" default, fallback "diag" if singular
+  refit_frequency: "monthly"
+  random_state: 42
+  features:
+    - "price_return"
+    - "price_volatility_24h"
+    - "gas_share"
+    - "spark_spread"
+
+
+# --- Anomaly Detection (Isolation Forest) ---
+anomaly_detection:
+  contamination: 0.05         # 5% — business choice, not statistical
+  n_estimators: 200
+  min_samples_per_regime: 500  # Below this, fallback to merge or global
+  event_grouping_hours: 5      # Typical shock 3-6h, compromise at 5
+  refit_frequency: "monthly"   # Consistent with HMM
+  random_state: 42
+  features:
+    - "price_return"
+    - "price_volatility_24h"
+    - "gas_share"
+    - "spark_spread"
+    - "load_zscore_24h"
+    - "ttf_price"
+
+
+# --- Prediction (XGBoost) ---
+prediction:
+  xgboost:
+    n_estimators: 1000
+    learning_rate: 0.05
+    max_depth: 6
+    early_stopping_rounds: 50
+    eval_metric: "mae"
+    random_state: 42
+    validation_split: 0.8   # First 80% chronological, last 20% validation.
+
+  model_b:
+    horizons:
+      - 2   # J+2
+      - 3   # J+3
+      - 4   # J+4
+
+
+# --- LightGBM Quantile ---
+lightgbm_quantile:
+  n_estimators: 500
+  learning_rate: 0.05
+  num_leaves: 31
+  quantiles:
+    - 0.1    # q10 (lower bound)
+    - 0.5    # q50 (median)
+    - 0.9    # q90 (upper bound)
+  random_state: 42
+
+
+# --- Alerts ---
+alerts:
+  p80_threshold: 0.80
+  p95_threshold: 0.95
+  top_cheap_hours: 8
+  top_expensive_hours: 4
+  shap_top_drivers: 3
+
+
+# --- Backtest ---
+backtest:
+  client_consumption_gwh_year: 100
+  flexible_share: 0.10          # 10% of consumption is flexible
+  flexibility_window_hours: 4   # Shift +-4h
+  assumed_project_cost_eur: 30000
+  period_start: "2024-01-01"
+  period_end: "2026-03-31"
