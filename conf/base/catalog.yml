@@ -1,4 +1,202 @@
-# Here you can define all your datasets by using simple YAML syntax.
+# ==================================================
+# DATA CATALOG — Energy Market Analyzer
+# ==================================================
+# Each dataset is declared with its type, path, and
+# options.
 #
-# Documentation for this file format can be found in "The Data Catalog"
-# Link: https://docs.kedro.org/en/stable/catalog-data/introduction/#data-catalog
+# Paths use ${globals:country} for multi-country support
+# (substituted from globals.yml).
+# ==================================================
+
+
+# === 01_raw : Raw API data ===
+
+entsoe_prices_raw:
+  type: pandas.CSVDataset
+  filepath: data/01_raw/entsoe/${globals:country}/prices.csv
+  save_args:
+    index: true
+  load_args:
+    parse_dates: true
+    index_col: 0
+
+entsoe_generation_raw:
+  type: pandas.CSVDataset
+  filepath: data/01_raw/entsoe/${globals:country}/generation.csv
+  save_args:
+    index: true
+  load_args:
+    parse_dates: true
+    index_col: 0
+
+entsoe_load_raw:
+  type: pandas.CSVDataset
+  filepath: data/01_raw/entsoe/${globals:country}/load.csv
+  save_args:
+    index: true
+  load_args:
+    parse_dates: true
+    index_col: 0
+
+entsoe_flows_raw:
+  type: pandas.CSVDataset
+  filepath: data/01_raw/entsoe/${globals:country}/flows.csv
+  save_args:
+    index: true
+  load_args:
+    parse_dates: true
+    index_col: 0
+
+yfinance_ttf_raw:
+  type: pandas.CSVDataset
+  filepath: data/01_raw/yfinance/ttf.csv
+  save_args:
+    index: true
+  load_args:
+    parse_dates: true
+    index_col: 0
+
+yfinance_carbon_raw:
+  type: pandas.CSVDataset
+  filepath: data/01_raw/yfinance/carbon.csv
+  save_args:
+    index: true
+  load_args:
+    parse_dates: true
+    index_col: 0
+
+openmeteo_weather_raw:
+  type: pandas.CSVDataset
+  filepath: data/01_raw/openmeteo/${globals:country}/weather.csv
+  save_args:
+    index: true
+  load_args:
+    parse_dates: true
+    index_col: 0
+
+
+# === 03_primary : Unified DataFrame ===
+
+master_dataframe:
+  type: pandas.ParquetDataset
+  filepath: data/03_primary/master.parquet
+  save_args:
+    engine: pyarrow
+  load_args:
+    engine: pyarrow
+
+
+# === 04_feature : Enriched DataFrame ===
+
+master_enriched:
+  type: pandas.ParquetDataset
+  filepath: data/04_feature/master_enriched.parquet
+  save_args:
+    engine: pyarrow
+  load_args:
+    engine: pyarrow
+
+
+# === 06_models : Serialized models ===
+
+hmm_model:
+  type: pickle.PickleDataset
+  filepath: data/06_models/hmm_regime.pkl
+  versioned: true
+
+isolation_forest_models:
+  type: pickle.PickleDataset
+  filepath: data/06_models/isolation_forests.pkl
+  versioned: true
+
+xgboost_global:
+  type: pickle.PickleDataset
+  filepath: data/06_models/xgboost_global.pkl
+  versioned: true
+
+xgboost_weighted:
+  type: pickle.PickleDataset
+  filepath: data/06_models/xgboost_weighted.pkl
+  versioned: true
+
+xgboost_per_regime:
+  type: pickle.PickleDataset
+  filepath: data/06_models/xgboost_per_regime.pkl
+  versioned: true
+
+xgboost_hybrid:
+  type: pickle.PickleDataset
+  filepath: data/06_models/xgboost_hybrid.pkl
+  versioned: true
+
+lightgbm_quantile_models:
+  type: pickle.PickleDataset
+  filepath: data/06_models/lightgbm_quantiles.pkl
+  versioned: true
+
+model_b_horizons:
+  type: pickle.PickleDataset
+  filepath: data/06_models/model_b_horizons.pkl
+  versioned: true
+
+
+# === 07_model_output : Predictions ===
+
+predictions_model_a:
+  type: pandas.ParquetDataset
+  filepath: data/07_model_output/predictions_model_a.parquet
+  save_args:
+    engine: pyarrow
+  load_args:
+    engine: pyarrow
+
+predictions_model_b:
+  type: pandas.ParquetDataset
+  filepath: data/07_model_output/predictions_model_b.parquet
+  save_args:
+    engine: pyarrow
+  load_args:
+    engine: pyarrow
+
+alerts:
+  type: pandas.ParquetDataset
+  filepath: data/07_model_output/alerts.parquet
+  save_args:
+    engine: pyarrow
+  load_args:
+    engine: pyarrow
+
+confidence_intervals:
+  type: pandas.ParquetDataset
+  filepath: data/07_model_output/confidence_intervals.parquet
+  save_args:
+    engine: pyarrow
+  load_args:
+    engine: pyarrow
+
+
+# === 08_reporting : Metrics and figures ===
+
+data_quality_report:
+  type: json.JSONDataset
+  filepath: data/08_reporting/metrics/data_quality_report.json
+
+raw_metadata:
+  type: json.JSONDataset
+  filepath: data/01_raw/_metadata.json
+
+model_comparison:
+  type: pandas.CSVDataset
+  filepath: data/08_reporting/metrics/model_comparison.csv
+
+metrics_by_regime:
+  type: pandas.CSVDataset
+  filepath: data/08_reporting/metrics/metrics_by_regime.csv
+
+backtest_results:
+  type: pandas.CSVDataset
+  filepath: data/08_reporting/metrics/backtest_results.csv
+
+shap_report:
+  type: json.JSONDataset
+  filepath: data/08_reporting/metrics/shap_report.json
