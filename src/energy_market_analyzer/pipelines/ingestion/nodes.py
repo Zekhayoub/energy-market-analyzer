@@ -278,3 +278,57 @@ def fetch_generation_by_tech(
     )
 
     return result
+
+
+def fetch_load(
+    params: dict[str, Any],
+    api_key: str,
+) -> pd.DataFrame:
+    """Fetch electricity demand (load) from ENTSO-E.
+
+    Args:
+        params: Ingestion parameters.
+        api_key: ENTSO-E API key.
+
+    Returns:
+        pd.DataFrame with column 'load_mw' (demand in MW).
+        Index: DatetimeIndex, hourly, naive UTC.
+    """
+    from entsoe import EntsoePandasClient
+
+    client = EntsoePandasClient(api_key=api_key)
+
+    country = params["country"]
+    start = pd.Timestamp(params["start_date"], tz="Europe/Brussels")
+    end = pd.Timestamp(params["end_date"], tz="Europe/Brussels")
+
+    result = _fetch_with_pagination(
+        query_fn=lambda s, e: client.query_load(country, start=s, end=e),
+        start=start,
+        end=end,
+        max_retries=params.get("retry_max_attempts", 3),
+        backoff_factor=params.get("retry_backoff_factor", 2),
+        label=f"load {country}",
+    )
+
+    result = _resample_to_hourly(result, f"load {country}")
+
+    # Some countries return multiple load columns (e.g.,
+    # consumption profiles). Sum them for total demand instead of
+    # blindly taking the first column with iloc[:, 0].
+    if isinstance(result, pd.Series):
+        df = pd.DataFrame({"load_mw": result.values}, index=result.index)
+    else:
+        df = pd.DataFrame({"load_mw": result.sum(axis=1).values}, index=result.index)
+
+    df.index.name = "timestamp"
+
+    assert df.index.is_monotonic_increasing, "Load index not monotonic"
+    assert not df["load_mw"].isna().all(), "All load values are NaN"
+
+    # Check hourly continuity
+    _check_hourly_continuity(df, f"load {country}")
+
+    logger.info("Fetched %d hourly load values for %s", len(df), country)
+
+    return df
