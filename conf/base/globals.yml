@@ -7,21 +7,20 @@
 
 country: "BE"
 
-# [NEW #11]
-weather_coordinates:
-  BE:
-    latitude: 50.85
-    longitude: 4.35
-    city: "Brussels"
-  DE:
-    latitude: 52.52
-    longitude: 13.41
-    city: "Berlin"
-  FR:
-    latitude: 48.85
-    longitude: 2.35
-    city: "Paris"
-  NL:
-    latitude: 52.37
-    longitude: 4.89
-    city: "Amsterdam"
+# weather_coordinates:
+#   BE:
+#     latitude: 50.85
+#     longitude: 4.35
+#     city: "Brussels"
+#   DE:
+#     latitude: 52.52
+#     longitude: 13.41
+#     city: "Berlin"
+#   FR:
+#     latitude: 48.85
+#     longitude: 2.35
+#     city: "Paris"
+#   NL:
+#     latitude: 52.37
+#     longitude: 4.89
+#     city: "Amsterdam"

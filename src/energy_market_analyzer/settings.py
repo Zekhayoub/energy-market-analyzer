@@ -27,6 +27,13 @@ logger = logging.getLogger(__name__)
 # ==================================================
 
 
+class CoordinateConfig(BaseModel):
+    """Validates a single weather coordinate pair."""
+
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+
+
 class IngestionConfig(BaseModel):
     """Validates the ingestion section of parameters.yml."""
 
@@ -38,6 +45,9 @@ class IngestionConfig(BaseModel):
     forward_fill_max_days: int = Field(..., ge=1, le=7)
     retry_max_attempts: int = Field(..., ge=1)
     retry_backoff_factor: int = Field(..., ge=1)
+
+    weather_coordinates: dict[str, CoordinateConfig]
+    expected_generation_techs: list[str] = Field(..., min_length=1)
 
     @field_validator("end_date")
     @classmethod

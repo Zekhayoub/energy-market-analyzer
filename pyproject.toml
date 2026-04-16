@@ -11,6 +11,7 @@ energy-market-analyzer = "energy_market_analyzer.__main__:main"
 [tool.kedro]
 package_name = "energy_market_analyzer"
 project_name = "energy-market-analyzer"
+kedro_init_version = "0.19.1"
 
 [tool.ruff]
 line-length = 100
