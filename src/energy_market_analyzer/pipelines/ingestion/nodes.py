@@ -202,3 +202,64 @@ def fetch_day_ahead_prices(
     )
 
     return df
+
+
+def fetch_generation_by_tech(
+    params: dict[str, Any],
+    api_key: str,
+) -> pd.DataFrame:
+    """Fetch electricity generation by technology from ENTSO-E.
+
+    Returns generation in MW for each technology. Technologies
+    that don't exist in the country (e.g., geothermal in Belgium)
+    are returned as columns with 0 values.
+
+    Args:
+        params: Ingestion parameters (country, dates, retry_*,
+            expected_generation_techs).
+        api_key: ENTSO-E API key.
+
+    Returns:
+        pd.DataFrame with one column per technology (MW).
+        Index: DatetimeIndex, hourly, naive UTC.
+    """
+    from entsoe import EntsoePandasClient
+
+    client = EntsoePandasClient(api_key=api_key)
+
+    country = params["country"]
+    start = pd.Timestamp(params["start_date"], tz="Europe/Brussels")
+    end = pd.Timestamp(params["end_date"], tz="Europe/Brussels")
+
+    expected_techs = params["expected_generation_techs"]
+
+    result = _fetch_with_pagination(
+        query_fn=lambda s, e: client.query_generation(country, start=s, end=e),
+        start=start,
+        end=end,
+        max_retries=params.get("retry_max_attempts", 3),
+        backoff_factor=params.get("retry_backoff_factor", 2),
+        label=f"generation {country}",
+    )
+
+    if isinstance(result.columns, pd.MultiIndex):
+        result.columns = result.columns.get_level_values(0)
+
+    result.index.name = "timestamp"
+
+    result = _resample_to_hourly(result, f"generation {country}")
+
+    assert result.index.is_monotonic_increasing, "Generation index not monotonic"
+
+    _check_hourly_continuity(result, f"generation {country}")
+
+    result = result.reindex(columns=expected_techs, fill_value=0.0)
+
+    logger.info(
+        "Fetched generation for %s: %d rows, %d technologies",
+        country,
+        len(result),
+        len(result.columns),
+    )
+
+    return result
