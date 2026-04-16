@@ -253,7 +253,22 @@ def fetch_generation_by_tech(
 
     _check_hourly_continuity(result, f"generation {country}")
 
-    result = result.reindex(columns=expected_techs, fill_value=0.0)
+    # --- FIX: missing technologies ---
+    # Belgium has no geothermal, France had no offshore until recently.
+    # Add missing columns with 0 to ensure all countries share the
+    # same schema. NaN would be incorrect: 0 MW of geothermal is
+    # a fact, not missing data.
+    for tech in expected_techs:
+        if tech not in result.columns:
+            result[tech] = 0.0
+            logger.info("Technology '%s' not found for %s — filled with 0", tech, country)
+
+    # Drop unexpected columns not in expected_techs.
+    # The API may return "Other" or "Waste" categories that vary
+    # between countries — filter to guarantee a stable schema.
+    result = result[expected_techs]
+
+    # result = result.reindex(columns=expected_techs, fill_value=0.0)
 
     logger.info(
         "Fetched generation for %s: %d rows, %d technologies",
