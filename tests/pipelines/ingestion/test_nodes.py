@@ -138,3 +138,54 @@ class TestFetchDayAheadPrices:
             assert df.index.is_monotonic_increasing
             assert not df.index.has_duplicates
             assert len(df) == 25
+
+
+class TestNetFlowCalculation:
+    """Tests for bidirectional flow and net flow computation."""
+
+    def test_net_flow_is_import_minus_export(self) -> None:
+        """net_flow = import - export. Positive = net importer."""
+        index = pd.date_range("2024-01-01", periods=24, freq="h")
+        df = pd.DataFrame(
+            {
+                "flow_fr_to_be": [200.0] * 24,
+                "flow_be_to_fr": [150.0] * 24,
+                "flow_nl_to_be": [100.0] * 24,
+                "flow_be_to_nl": [80.0] * 24,
+            },
+            index=index,
+        )
+
+        df["net_flow_fr"] = df["flow_fr_to_be"].sub(df["flow_be_to_fr"], fill_value=0)
+        df["net_flow_nl"] = df["flow_nl_to_be"].sub(df["flow_be_to_nl"], fill_value=0)
+        df["net_import_total"] = df[["net_flow_fr", "net_flow_nl"]].sum(axis=1, min_count=1)
+
+        assert df["net_flow_fr"].iloc[0] == 50.0
+        assert df["net_flow_nl"].iloc[0] == 20.0
+        assert df["net_import_total"].iloc[0] == 70.0
+
+    def test_net_flow_can_be_negative(self) -> None:
+        """Net flow can be negative (country is net exporter)."""
+        index = pd.date_range("2024-01-01", periods=24, freq="h")
+        df = pd.DataFrame(
+            {
+                "flow_fr_to_be": [100.0] * 24,
+                "flow_be_to_fr": [250.0] * 24,
+            },
+            index=index,
+        )
+        df["net_flow_fr"] = df["flow_fr_to_be"].sub(df["flow_be_to_fr"], fill_value=0)
+        assert df["net_flow_fr"].iloc[0] == -150.0
+
+    def test_sporadic_nan_does_not_destroy_valid_data(self) -> None:
+        """If export has NaN for one hour, import value is preserved."""
+        index = pd.date_range("2024-01-01", periods=3, freq="h")
+        df = pd.DataFrame(
+            {
+                "flow_fr_to_be": [200.0, 200.0, 200.0],
+                "flow_be_to_fr": [150.0, np.nan, 150.0],
+            },
+            index=index,
+        )
+        df["net_flow_fr"] = df["flow_fr_to_be"].sub(df["flow_be_to_fr"], fill_value=0)
+        assert df["net_flow_fr"].iloc[1] == 200.0
