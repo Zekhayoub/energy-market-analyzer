@@ -332,3 +332,61 @@ def fetch_load(
     logger.info("Fetched %d hourly load values for %s", len(df), country)
 
     return df
+
+
+def fetch_crossborder_flows(
+    params: dict[str, Any],
+    api_key: str,
+) -> pd.DataFrame:
+    """Fetch cross-border electricity flows from ENTSO-E.
+
+    Args:
+        params: Ingestion parameters with 'neighbors' list.
+        api_key: ENTSO-E API key.
+
+    Returns:
+        pd.DataFrame with columns like 'flow_fr_to_be' (MW).
+        Index: DatetimeIndex, hourly, naive UTC.
+    """
+    from entsoe import EntsoePandasClient
+
+    client = EntsoePandasClient(api_key=api_key)
+
+    country = params["country"]
+    neighbors = params["neighbors"]
+    start = pd.Timestamp(params["start_date"], tz="Europe/Brussels")
+    end = pd.Timestamp(params["end_date"], tz="Europe/Brussels")
+
+    flows_dict: dict[str, pd.Series] = {}
+
+    for neighbor in neighbors:
+        col_name = f"flow_{neighbor.lower()}_to_{country.lower()}"
+        logger.info("Fetching flow %s -> %s", neighbor, country)
+
+        try:
+            series = _fetch_with_pagination(
+                query_fn=lambda s, e, n=neighbor: client.query_crossborder_flows(
+                    n,
+                    country,
+                    start=s,
+                    end=e,
+                ),
+                start=start,
+                end=end,
+                max_retries=params.get("retry_max_attempts", 3),
+                backoff_factor=params.get("retry_backoff_factor", 2),
+                label=f"flow {neighbor}->{country}",
+            )
+            flows_dict[col_name] = series
+        except (ValueError, RuntimeError):
+            logger.warning("No flow data for %s->%s", neighbor, country)
+
+    if not flows_dict:
+        raise ValueError(f"No cross-border flow data for {country}")
+
+    df = pd.DataFrame(flows_dict)
+    df.index.name = "timestamp"
+
+    logger.info("Fetched %d flow series for %s (import only)", len(flows_dict), country)
+
+    return df
