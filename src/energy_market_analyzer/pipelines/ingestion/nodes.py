@@ -530,3 +530,60 @@ def fetch_gas_price_ttf(
     logger.info("Fetched %d daily TTF prices", len(result))
 
     return result
+
+
+def fetch_carbon_price_eua(
+    params: dict[str, Any],
+) -> pd.DataFrame:
+    """Fetch EU ETS carbon allowance prices from Yahoo Finance.
+
+    Args:
+        params: Ingestion parameters (start_date, end_date).
+
+    Returns:
+        pd.DataFrame with column 'carbon_close' (EUR/tonne).
+        Index: DatetimeIndex, DAILY, naive UTC (midnight-aligned).
+    """
+    import yfinance as yf
+
+    start = str(params["start_date"])
+
+    end = (pd.Timestamp(params["end_date"]) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+    logger.info("Fetching EU ETS carbon prices from yfinance: %s to %s", start, end)
+
+    ticker = yf.Ticker("^ICEEUA")
+
+    max_retries = params.get("retry_max_attempts", 3)
+    backoff = params.get("retry_backoff_factor", 2)
+
+    for attempt in range(1, max_retries + 1):
+        df = ticker.history(start=start, end=end, auto_adjust=False)
+        if df is not None and len(df) > 0:
+            break
+        if attempt < max_retries:
+            wait = backoff**attempt
+            logger.info("yfinance carbon retry %d/%d in %ds", attempt, max_retries, wait)
+            time.sleep(wait)
+    else:
+        raise ValueError(
+            "No carbon data returned from yfinance after "
+            f"{max_retries} attempts. Ticker ^ICEEUA may have changed."
+        )
+
+    if "Close" not in df.columns:
+        raise ValueError(f"Expected 'Close' column. Got: {df.columns.tolist()}")
+
+    result = pd.DataFrame({"carbon_close": df["Close"].values}, index=df.index)
+
+    if result.index.tz is not None:
+        result.index = result.index.tz_localize(None).normalize()
+
+    result.index.name = "timestamp"
+
+    assert result.index.is_monotonic_increasing, "Carbon index not monotonic"
+    assert not result["carbon_close"].isna().all(), "All carbon prices are NaN"
+
+    logger.info("Fetched %d daily carbon prices", len(result))
+
+    return result
