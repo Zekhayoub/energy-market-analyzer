@@ -16,6 +16,7 @@ import warnings
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -338,14 +339,31 @@ def fetch_crossborder_flows(
     params: dict[str, Any],
     api_key: str,
 ) -> pd.DataFrame:
-    """Fetch cross-border electricity flows from ENTSO-E.
+    """Fetch BIDIRECTIONAL cross-border flows from ENTSO-E.
+
+    For each neighbor, fetches flows in BOTH directions:
+        - neighbor -> country (imports)
+        - country -> neighbor (exports)
+
+    Then computes net flows:
+        net_flow_X = flow_X_to_country - flow_country_to_X
+
+    Positive net flow = country is importing (net importer).
+    Negative net flow = country is exporting (net exporter).
+
+    For Belgium with neighbors [FR, NL, DE_LU]:
+        6 API calls (3 import + 3 export)
+        3 net flow columns + 1 total net import column
 
     Args:
         params: Ingestion parameters with 'neighbors' list.
         api_key: ENTSO-E API key.
 
     Returns:
-        pd.DataFrame with columns like 'flow_fr_to_be' (MW).
+        pd.DataFrame with columns:
+            - flow_fr_to_be, flow_be_to_fr (raw flows)
+            - net_flow_fr (import - export)
+            - net_import_total (sum of all net flows)
         Index: DatetimeIndex, hourly, naive UTC.
     """
     from entsoe import EntsoePandasClient
@@ -356,37 +374,98 @@ def fetch_crossborder_flows(
     neighbors = params["neighbors"]
     start = pd.Timestamp(params["start_date"], tz="Europe/Brussels")
     end = pd.Timestamp(params["end_date"], tz="Europe/Brussels")
+    max_retries = params.get("retry_max_attempts", 3)
+    backoff = params.get("retry_backoff_factor", 2)
 
-    flows_dict: dict[str, pd.Series] = {}
-
-    for neighbor in neighbors:
-        col_name = f"flow_{neighbor.lower()}_to_{country.lower()}"
-        logger.info("Fetching flow %s -> %s", neighbor, country)
-
+    def _safe_fetch_flow(from_c: str, to_c: str) -> pd.Series | None:
+        """Fetch a single directional flow, return None on failure."""
         try:
-            series = _fetch_with_pagination(
-                query_fn=lambda s, e, n=neighbor: client.query_crossborder_flows(
-                    n,
-                    country,
+            return _fetch_with_pagination(
+                query_fn=lambda s, e: client.query_crossborder_flows(
+                    from_c,
+                    to_c,
                     start=s,
                     end=e,
                 ),
                 start=start,
                 end=end,
-                max_retries=params.get("retry_max_attempts", 3),
-                backoff_factor=params.get("retry_backoff_factor", 2),
-                label=f"flow {neighbor}->{country}",
+                max_retries=max_retries,
+                backoff_factor=backoff,
+                label=f"flow {from_c}->{to_c}",
             )
-            flows_dict[col_name] = series
         except (ValueError, RuntimeError):
-            logger.warning("No flow data for %s->%s", neighbor, country)
+            logger.warning("No flow data for %s->%s", from_c, to_c)
+            return None
+
+    # --- Fetch bidirectional flows ---
+    flows_dict: dict[str, pd.Series] = {}
+
+    for neighbor in neighbors:
+        n_lower = neighbor.lower().replace("_", "")
+        c_lower = country.lower()
+
+        import_col = f"flow_{n_lower}_to_{c_lower}"
+        export_col = f"flow_{c_lower}_to_{n_lower}"
+
+        # Import: neighbor -> country
+        logger.info("Fetching flow %s -> %s (import)", neighbor, country)
+        import_flow = _safe_fetch_flow(neighbor, country)
+        if import_flow is not None:
+            flows_dict[import_col] = import_flow
+        else:
+            logger.warning("Missing import flow %s->%s, inserting NaN", neighbor, country)
+
+        # Export: country -> neighbor
+        logger.info("Fetching flow %s -> %s (export)", country, neighbor)
+        export_flow = _safe_fetch_flow(country, neighbor)
+        if export_flow is not None:
+            flows_dict[export_col] = export_flow
+        else:
+            logger.warning("Missing export flow %s->%s, inserting NaN", country, neighbor)
 
     if not flows_dict:
         raise ValueError(f"No cross-border flow data for {country}")
 
     df = pd.DataFrame(flows_dict)
+
+    df = _resample_to_hourly(df, f"flows {country}")
+
+    # --- Compute net flows ---
+    for neighbor in neighbors:
+        n_lower = neighbor.lower().replace("_", "")
+        c_lower = country.lower()
+
+        import_col = f"flow_{n_lower}_to_{c_lower}"
+        export_col = f"flow_{c_lower}_to_{n_lower}"
+
+        if import_col in df.columns and export_col in df.columns:
+            df[f"net_flow_{n_lower}"] = df[import_col].sub(
+                df[export_col],
+                fill_value=0,
+            )
+        elif import_col in df.columns:
+            df[f"net_flow_{n_lower}"] = df[import_col]
+        elif export_col in df.columns:
+            df[f"net_flow_{n_lower}"] = -df[export_col]
+        else:
+            df[f"net_flow_{n_lower}"] = np.nan
+
+    net_flow_cols = [c for c in df.columns if c.startswith("net_flow_")]
+    if net_flow_cols:
+        df["net_import_total"] = df[net_flow_cols].sum(axis=1, min_count=1)
+
     df.index.name = "timestamp"
 
-    logger.info("Fetched %d flow series for %s (import only)", len(flows_dict), country)
+    assert df.index.is_monotonic_increasing, "Flows index not monotonic"
+
+    _check_hourly_continuity(df, f"flows {country}")
+
+    logger.info(
+        "Fetched %d bidirectional flows for %s (%d neighbors, %d API calls)",
+        len(df),
+        country,
+        len(neighbors),
+        len(neighbors) * 2,
+    )
 
     return df
