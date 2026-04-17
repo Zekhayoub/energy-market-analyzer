@@ -14,6 +14,7 @@ import logging
 import time
 import warnings
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -587,3 +588,123 @@ def fetch_carbon_price_eua(
     logger.info("Fetched %d daily carbon prices", len(result))
 
     return result
+
+
+def fetch_weather_openmeteo(
+    params: dict[str, Any],
+) -> pd.DataFrame:
+    """Fetch historical weather data from Open-Meteo.
+
+    Args:
+        params: Ingestion parameters. Must include 'country'
+            and 'weather_coordinates' dict.
+
+    Returns:
+        pd.DataFrame with columns:
+            - temperature_2m (deg C)
+            - wind_speed_100m (m/s at 100m hub height)
+            - shortwave_radiation (W/m2)
+            - cloud_cover (%)
+        Index: DatetimeIndex, hourly, naive UTC.
+    """
+    import openmeteo_requests
+    import requests_cache
+    from retry_requests import retry
+
+    country = params["country"]
+    coordinates = params.get("weather_coordinates", {})
+
+    if country not in coordinates:
+        raise ValueError(
+            f"No coordinates defined for country '{country}'. "
+            f"Add {country} to ingestion.weather_coordinates in parameters.yml. "
+            f"Available: {list(coordinates.keys())}"
+        )
+
+    coords = coordinates[country]
+
+    lat = coords["latitude"] if isinstance(coords, dict) else coords.latitude
+    lon = coords["longitude"] if isinstance(coords, dict) else coords.longitude
+
+    start = str(params["start_date"])
+    end = str(params["end_date"])
+
+    logger.info(
+        "Fetching weather for %s (%.2f, %.2f): %s to %s",
+        country,
+        lat,
+        lon,
+        start,
+        end,
+    )
+
+    Path(".cache").mkdir(parents=True, exist_ok=True)
+
+    cache_session = requests_cache.CachedSession(
+        ".cache/openmeteo",
+        expire_after=86400,
+        allowable_codes=[200],
+    )
+    retry_session = retry(
+        cache_session,
+        retries=params.get("retry_max_attempts", 5),
+        backoff_factor=params.get("retry_backoff_factor", 0.2),
+    )
+    om = openmeteo_requests.Client(session=retry_session)
+
+    # padded_start = str(pd.Timestamp(start) - pd.Timedelta(days=1))
+    # padded_end = str(pd.Timestamp(end) + pd.Timedelta(days=1))
+    padded_start = (pd.Timestamp(start) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    padded_end = (pd.Timestamp(end) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+    api_params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": [
+            "temperature_2m",
+            "wind_speed_100m",
+            "shortwave_radiation",
+            "cloud_cover",
+        ],
+        "start_date": padded_start,
+        "end_date": padded_end,
+        "timezone": "UTC",
+    }
+
+    responses = om.weather_api(
+        "https://archive-api.open-meteo.com/v1/archive",
+        params=api_params,
+    )
+
+    if not responses:
+        raise ValueError(f"No weather data returned for {country}")
+
+    response = responses[0]
+    hourly = response.Hourly()
+
+    index = pd.date_range(
+        start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
+        end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
+        freq=pd.Timedelta(seconds=hourly.Interval()),
+        inclusive="left",
+    )
+
+    df = pd.DataFrame(
+        {
+            "temperature_2m": hourly.Variables(0).ValuesAsNumpy(),
+            "wind_speed_100m": hourly.Variables(1).ValuesAsNumpy(),
+            "shortwave_radiation": hourly.Variables(2).ValuesAsNumpy(),
+            "cloud_cover": hourly.Variables(3).ValuesAsNumpy(),
+        },
+        index=index,
+    )
+
+    # UTC naive
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+
+    df.index.name = "timestamp"
+
+    logger.info("Fetched %d hourly weather observations for %s", len(df), country)
+
+    return df
