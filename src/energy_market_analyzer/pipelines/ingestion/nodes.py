@@ -469,3 +469,64 @@ def fetch_crossborder_flows(
     )
 
     return df
+
+
+def fetch_gas_price_ttf(
+    params: dict[str, Any],
+) -> pd.DataFrame:
+    """Fetch TTF natural gas prices from Yahoo Finance.
+
+    TTF (Title Transfer Facility) is the European benchmark for
+    gas prices. It drives the electricity price via the merit order.
+
+    Args:
+        params: Ingestion parameters (start_date, end_date).
+
+    Returns:
+        pd.DataFrame with column 'ttf_close' (EUR/MWh).
+        Index: DatetimeIndex, DAILY, naive UTC (midnight-aligned).
+    """
+    import yfinance as yf
+
+    start = str(params["start_date"])
+
+    end = (pd.Timestamp(params["end_date"]) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+    logger.info("Fetching TTF gas prices from yfinance: %s to %s", start, end)
+
+    ticker = yf.Ticker("TTF=F")
+
+    max_retries = params.get("retry_max_attempts", 3)
+    backoff = params.get("retry_backoff_factor", 2)
+
+    for attempt in range(1, max_retries + 1):
+        df = ticker.history(start=start, end=end, auto_adjust=False)
+        if df is not None and len(df) > 0:
+            break
+        if attempt < max_retries:
+            wait = backoff**attempt
+            logger.info("yfinance TTF retry %d/%d in %ds", attempt, max_retries, wait)
+            time.sleep(wait)
+    else:
+        raise ValueError(
+            "No TTF data returned from yfinance after "
+            f"{max_retries} attempts. Ticker TTF=F may have changed."
+        )
+
+    if "Close" not in df.columns:
+        raise ValueError(
+            f"Expected 'Close' column in yfinance response. " f"Got columns: {df.columns.tolist()}."
+        )
+
+    result = pd.DataFrame({"ttf_close": df["Close"].values}, index=df.index)
+
+    if result.index.tz is not None:
+        result.index = result.index.tz_localize(None).normalize()
+
+    result.index.name = "timestamp"
+
+    assert not result["ttf_close"].isna().all(), "All TTF prices are NaN"
+
+    logger.info("Fetched %d daily TTF prices", len(result))
+
+    return result
