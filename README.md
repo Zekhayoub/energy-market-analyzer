@@ -1,101 +1,178 @@
-# energy-market-analyzer
+# Energy Market Analyzer
 
-[![Powered by Kedro](https://img.shields.io/badge/powered_by-kedro-ffc900?logo=kedro)](https://kedro.org)
 
-## Overview
+**A Kedro-based pipeline for Belgian electricity market regime detection, price prediction, and procurement alert generation.**
 
-This is your new Kedro project, which was generated using `kedro 1.3.1`.
+---
 
-Take a look at the [Kedro documentation](https://docs.kedro.org) to get started.
+## 1. Why This Project Matters
 
-## Rules and guidelines
+**The Price Volatility Problem.**
+Belgian electricity prices swung from ~40 €/MWh (2019) to over 700 €/MWh (August 2022 energy crisis), then spiked again to ~150 €/MWh (March 2026, Iran-USA conflict and Strait of Hormuz closure). Industrial consumers purchasing ~100 GWh/year on the spot market absorb these shocks without any anticipation tool.
 
-In order to get the best out of the template:
+**The Anticipation Problem.**
+The official day-ahead price is published by EPEX SPOT at 12:45 CET. Any prediction made *after* publication has zero value. This pipeline produces its morning report at 11:00 CET — giving the procurement team 1h45 of actionable lead time before the market reveals the price.
 
-* Don't remove any lines from the `.gitignore` file we provide
-* Make sure your results can be reproduced by following a data engineering convention
-* Don't commit data to your repository
-* Don't commit any credentials or your local configuration to your repository. Keep all your credentials and local configuration in `conf/local/`
+**The Context Problem.**
+A price of 150 €/MWh is perfectly normal during an energy crisis but highly anomalous during a calm market. Traditional threshold-based alerts ignore this. This pipeline detects the current market regime (calm / volatile / crisis) and contextualizes every alert within its regime — a 150 €/MWh hour in a calm regime triggers a critical alert, the same price in a crisis regime is flagged as normal.
 
-## How to install dependencies
+**The Trust Problem.**
+ML models are black boxes for procurement teams. This pipeline explains every prediction using SHAP: "price is high because TTF gas rose +12% and wind production dropped 40%." The team acts on reasons, not on opaque scores.
 
-Declare any dependencies in `requirements.txt` for `pip` installation.
+---
 
-To install them, run:
+## 2. Problem Statement
+
+A Belgian industrial client consuming ~100 GWh/year purchases electricity on the European day-ahead spot market. The client has a steelmaking profile: 10% of consumption (arc furnaces, grinders) is flexible and can be shifted within a ±4-hour window without impacting production.
+
+**Business KPI:** € saved per year by shifting 10% of flexible consumption from critical-alert hours to calm-regime hours.
+
+**Target performance (validated by backtest):**
+- Model A (day-ahead hourly, J+1): MAE ... €/MWh
+- Model B (daily average, J+2 to J+4): gradual degradation
+- Estimated annual savings: ~... k€/year for the reference client
+
+---
+
+## 3. Solution Overview
+
+The pipeline delivers five capabilities:
+
+1. **Regime Detection** — Identifies the current market state (calm / volatile / crisis) using a Hidden Markov Model with monthly expanding window.
+2. **Anomaly Detection** — Flags abnormal prices *within their regime context* using per-regime Isolation Forests.
+3. **Price Prediction** — Forecasts 24 hourly prices for J+1 (Model A) and daily averages for J+2 to J+4 (Model B) using 4 XGBoost variants with LightGBM quantile confidence intervals.
+4. **Interpretation** — Explains each prediction with SHAP TreeExplainer: global importance, per-regime importance, and force plots on 4 key economic moments (COVID, 2022 crisis, calm return, Iran 2026).
+5. **Actionable Alerts** — Generates procurement signals combining alert level (normal / high / critical), confidence (from CI width), and top-3 SHAP drivers per hour.
+
+**Morning report example (produced at 11:00 CET):**
+```
+Date: Monday 11:00
+Predictions for Tuesday (J+1):
+  Average price: 87 €/MWh (interval 72–103)
+  00h–06h: 65 €/MWh  → CHEAPEST
+  12h–18h: 105 €/MWh → MOST EXPENSIVE
+  Top 8 hours to shift to: 03h, 04h, 05h, 02h, 06h, 01h, 23h, 00h
+  Top 4 hours to avoid: 17h, 18h, 16h, 19h
+  Regime: VOLATILE
+  Alert: critical — 180 €/MWh (155–205) — high confidence
+         drivers: TTF +40%, wind -60%, temperature -8%
+```
+
+---
+
+## 4. Pipeline Architecture
 
 ```
+ENTSO-E API ──┐
+yfinance ─────┤── Ingestion ── Features ── HMM ── IF ── XGBoost ── SHAP ── Alerts
+Open-Meteo ───┘       │           │         │      │       │         │        │
+                  master.parquet  26 feat  3 reg  anom  4 var+LGB  explain  report
+```
+
+Built with **Kedro**. Each box is an independent sub-pipeline:
+
+```
+kedro run                          # full pipeline
+kedro run --pipeline=ingestion     # only ingestion
+kedro run --pipeline=inference     # production: predict + alert
+kedro viz                          # interactive DAG visualization
+```
+
+---
+
+## 5. Data Sources
+
+| Source | Tool | Data | Frequency | Period | API Key |
+|--------|------|------|-----------|--------|---------|
+| ENTSO-E | `entsoe-py` | Day-ahead prices, generation by technology, load, bidirectional cross-border flows (BE↔FR, BE↔NL, BE↔DE) | Hourly | 2015–2026 | Yes (free) |
+| Yahoo Finance | `yfinance` | TTF natural gas (TTF=F), EU ETS carbon (^ICEEUA) | Daily | 2015–2026 | No |
+| Open-Meteo | `openmeteo-requests` | Temperature, wind speed (100m), solar radiation, cloud cover | Hourly | 2015–2026 | No |
+
+All data is free. No manual CSV downloads — everything is fetched via APIs.
+
+---
+
+## 6. Models
+
+### Model A — Day-ahead hourly prediction (J+1)
+
+Predicts the 24 hourly prices for the next day, produced before the EPEX SPOT publication at 12:45 CET.
+
+4 XGBoost variants compared:
+
+| Variant | Strategy | When it works best |
+|---------|----------|-------------------|
+| Global | Single model on all data | Baseline — stable performance |
+| Weighted | Global + sample weighting by regime | Better on rare regimes (crisis) |
+| Per-regime | 3 specialized models (one per regime) | Best within each regime |
+| Hybrid | Bayesian weighting by HMM confidence | Best during regime transitions |
+
+### Model B — Daily average prediction (J+2 to J+4)
+
+One parameterizable function `train_horizon_model(horizon=h)` producing 3 instances:
+- h=2 → J+2 daily average
+- h=3 → J+3 daily average
+- h=4 → J+4 daily average
+
+
+### Model C — Retrospective analysis
+
+Not a prediction model. HMM detects regimes and Isolation Forest detects anomalies on the full historical dataset. Used for market understanding, not for alerts.
+
+---
+
+## 7. Key Results
+
+> ** Results will be added after model training and backtesting.**
+
+---
+
+## 8. How to Run
+
+### Prerequisites
+
+- Python 3.12+
+- An ENTSO-E API key
+
+### Without Docker
+
+```bash
+# 1. Clone
+git clone https://github.com/Zekhayoub/energy-market-analyzer.git
+cd energy-market-analyzer
+
+# 2. Install
 pip install -r requirements.txt
+
+# 3. Configure credentials
+cp conf/local/credentials.yml.example conf/local/credentials.yml
+# Edit credentials.yml and paste your ENTSO-E API key
+
+# 4. Run
+kedro run                          # full pipeline
+kedro run --pipeline=inference     # production mode (predict + alert)
+kedro viz                          # visualize the DAG
+
+# 5. Tests
+pytest                             # unit tests only
+pytest -m integration              # integration tests (needs real data)
 ```
 
-## How to run your Kedro pipeline
+### With Docker
 
-You can run your Kedro project with:
-
-```
-kedro run
-```
-
-## How to test your Kedro project
-
-Have a look at the file `tests/test_run.py` for instructions on how to write your tests. You can run your tests as follows:
-
-```
-pytest
+```bash
+docker build -t energy-analyzer .
+docker run --rm \
+    -v $(pwd)/conf/local:/app/conf/local \
+    -v $(pwd)/data:/app/data \
+    energy-analyzer kedro run
 ```
 
-You can configure the coverage threshold in your project's `pyproject.toml` file under the `[tool.coverage.report]` section.
 
+---
 
-## Project dependencies
+## 9. Limitations
 
-To see and update the dependency requirements for your project use `requirements.txt`. You can install the project requirements with `pip install -r requirements.txt`.
+This section lists every known limitation of the project. Each point is a deliberate documentation choice, not an oversight.
 
-[Further information about project dependencies](https://docs.kedro.org/en/stable/kedro_project_setup/dependencies.html#project-specific-dependencies)
-
-## How to work with Kedro and notebooks
-
-> Note: Using `kedro jupyter` or `kedro ipython` to run your notebook provides these variables in scope: `context`, 'session', `catalog`, and `pipelines`.
->
-> Jupyter, JupyterLab, and IPython are already included in the project requirements by default, so once you have run `pip install -r requirements.txt` you will not need to take any extra steps before you use them.
-
-### Jupyter
-To use Jupyter notebooks in your Kedro project, you need to install Jupyter:
-
-```
-pip install jupyter
-```
-
-After installing Jupyter, you can start a local notebook server:
-
-```
-kedro jupyter notebook
-```
-
-### JupyterLab
-To use JupyterLab, you need to install it:
-
-```
-pip install jupyterlab
-```
-
-You can also start JupyterLab:
-
-```
-kedro jupyter lab
-```
-
-### IPython
-And if you want to run an IPython session:
-
-```
-kedro ipython
-```
-
-### How to ignore notebook output cells in `git`
-To automatically strip out all output cell contents before committing to `git`, you can use tools like [`nbstripout`](https://github.com/kynan/nbstripout). For example, you can add a hook in `.git/config` with `nbstripout --install`. This will run `nbstripout` before anything is committed to `git`.
-
-> *Note:* Your output cells will be retained locally.
-
-## Package your Kedro project
-
-[Further information about building project documentation and packaging your project](https://docs.kedro.org/en/stable/deploy/package_a_project/#package-an-entire-kedro-project)
+---
