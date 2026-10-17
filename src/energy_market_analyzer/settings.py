@@ -1,12 +1,13 @@
-"""Kedro project settings with pydantic validation hooks.
+"""Kedro project settings: parameter validation and the ENTSO-E key hook.
 
-This module defines:
-1. Pydantic models that validate parameters.yml at startup.
-2. Kedro hooks that run validation before any pipeline node.
+Kedro reads this module at startup. It defines:
+1. Pydantic models that validate parameters.yml before any node runs.
+   A wrong value or an unknown key (a typo) stops the run at once,
+   with a message that names the faulty parameter.
+2. Hooks that hand the ENTSO-E key to the pipelines as a masked value
+   and ask for it only when the pipeline being run needs it.
 
-If a parameter is invalid (e.g., contamination=1.5), the
-pipeline fails immediately with a clear error message instead
-of crashing 3 hours later in scikit-learn.
+Each pipeline adds the model of its own parameter section here.
 """
 
 from __future__ import annotations
@@ -14,357 +15,202 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date
-from typing import Any, Literal
+from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from kedro.framework.hooks import hook_impl
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 logger = logging.getLogger(__name__)
 
+# Name of the key in conf/local/credentials.yml and of the catalog entry fed to the nodes.
+ENTSOE_API_KEY = "entsoe_api_key"
+MISSING_KEY_MESSAGE = (
+    "The ENTSO-E API key is missing. Create conf/local/credentials.yml containing the line "
+    f"`{ENTSOE_API_KEY}: <your key>` (see README.md, section Installation)."
+)
+
+ENTSOE_ZONE_PATTERN = r"^[A-Z]{2}(_[A-Z]{2,3})*$"
+GENERATION_COLUMN_PATTERN = r"^gen_[a-z0-9_]+_mw$"
+HTTPS_URL_PATTERN = r"^https://"
+
 
 # ==================================================
-# Pydantic models for parameters.yml validation
+# Parameter models
 # ==================================================
 
 
-class CoordinateConfig(BaseModel):
-    """Validates a single weather coordinate pair."""
+class StrictModel(BaseModel):
+    """Base of all parameter models: an unknown key is an error, not ignored."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class WeatherConfig(StrictModel):
+    """Point and model of the observed weather (Open-Meteo archive)."""
 
     latitude: float = Field(..., ge=-90, le=90)
     longitude: float = Field(..., ge=-180, le=180)
+    model: str = Field(..., min_length=1)
+    archive_url: str = Field(..., pattern=HTTPS_URL_PATTERN)
 
 
-class IngestionConfig(BaseModel):
-    """Validates the ingestion section of parameters.yml."""
+class IngestionConfig(StrictModel):
+    """Validates the `ingestion` section of parameters.yml."""
 
-    country: str = Field(..., pattern=r"^[A-Z]{2}$")
+    country: str = Field(..., pattern=ENTSOE_ZONE_PATTERN)
+    market_timezone: str
     start_date: date
     end_date: date
-    # timezone removed
-    neighbors: list[str]
-    forward_fill_max_days: int = Field(..., ge=1, le=7)
+    quarter_hour_prices_from: date
+    borders: dict[str, date | None] = Field(..., min_length=1)
+    generation_columns: dict[str, str] = Field(..., min_length=1)
+    zero_when_unpublished: list[str]
+    ttf_ticker: str = Field(..., min_length=1)
+    eua_contract: str = Field(..., min_length=1)
+    eua_archive_url: str = Field(..., pattern=HTTPS_URL_PATTERN)
+    eua_archive_last_year: int = Field(..., ge=2012)
+    eua_yearly_url: str = Field(..., pattern=HTTPS_URL_PATTERN + r".*\{year\}")
+    max_history_gap_days: int = Field(..., ge=0)
+    entsoe_window_months: int = Field(..., ge=1, le=11)
+    weather: WeatherConfig
     retry_max_attempts: int = Field(..., ge=1)
-    retry_backoff_factor: int = Field(..., ge=1)
+    retry_backoff_seconds: float = Field(..., ge=0)
+    http_timeout_seconds: float = Field(..., gt=0)
 
-    weather_coordinates: dict[str, CoordinateConfig]
-    expected_generation_techs: list[str] = Field(..., min_length=1)
-
-    @field_validator("end_date")
+    @field_validator("market_timezone")
     @classmethod
-    def end_after_start(cls, v: date, info: Any) -> date:
-        """Ensure end_date is after start_date."""
-        if "start_date" in info.data and v <= info.data["start_date"]:
-            raise ValueError(f"end_date ({v}) must be after start_date ({info.data['start_date']})")
-        return v
+    def timezone_exists(cls, value: str) -> str:
+        """Reject a time zone name that the tz database does not know."""
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError(f"Unknown time zone '{value}'") from error
+        return value
 
-    @field_validator("neighbors")
+    @field_validator("borders")
     @classmethod
-    def neighbors_valid(cls, v: list[str]) -> list[str]:
-        """Ensure neighbors are valid ENTSO-E country codes."""
-        if not v:
-            raise ValueError("neighbors must contain at least one country code")
-        pattern = re.compile(r"^[A-Z]{2}(_[A-Z]{2,3})*$")
-        for code in v:
-            if not pattern.match(code):
-                raise ValueError(
-                    f"Invalid ENTSO-E country code: '{code}'. "
-                    f"Expected format: 'XX' or 'XX_YY' (e.g., 'FR', 'DE_LU')"
-                )
-        return v
+    def border_codes_are_entsoe_zones(cls, value: dict[str, date | None]) -> dict[str, date | None]:
+        """Each neighbour must be written as an ENTSO-E zone code, e.g. 'FR' or 'DE_LU'."""
+        invalid_codes = [code for code in value if not _is_entsoe_zone(code)]
+        if invalid_codes:
+            raise ValueError(f"Invalid ENTSO-E zone codes in borders: {invalid_codes}")
+        return value
 
-
-class RollingWindowsConfig(BaseModel):
-    """Validates rolling window sizes."""
-
-    short: int = Field(..., ge=1)
-    medium: int = Field(..., ge=1)
-    long: int = Field(..., ge=1)
+    @field_validator("generation_columns")
+    @classmethod
+    def generation_columns_are_unique(cls, value: dict[str, str]) -> dict[str, str]:
+        """Column names must follow gen_<name>_mw and appear only once."""
+        invalid_names = [name for name in value.values() if not _is_generation_column(name)]
+        if invalid_names:
+            raise ValueError(f"Generation columns must look like gen_<name>_mw: {invalid_names}")
+        has_duplicates = len(set(value.values())) < len(value)
+        if has_duplicates:
+            raise ValueError("Two production types are mapped to the same generation column")
+        return value
 
     @model_validator(mode="after")
-    def short_lt_medium_lt_long(self) -> RollingWindowsConfig:
-        """Ensure short < medium < long."""
-        if not (self.short < self.medium < self.long):
+    def dates_are_consistent(self) -> IngestionConfig:
+        """Consistent period, borders in service before its end, known zero columns."""
+        if self.end_date < self.start_date:
             raise ValueError(
-                f"Rolling windows must satisfy short < medium < long, "
-                f"got short={self.short}, medium={self.medium}, long={self.long}"
+                f"end_date ({self.end_date}) must not be before start_date ({self.start_date})"
             )
+        unknown_zero_columns = sorted(
+            set(self.zero_when_unpublished) - set(self.generation_columns.values())
+        )
+        if unknown_zero_columns:
+            raise ValueError(
+                f"zero_when_unpublished lists columns not in generation_columns: "
+                f"{unknown_zero_columns}"
+            )
+        if self.country in self.borders:
+            raise ValueError(f"borders must not contain the country itself ({self.country})")
+        late_borders = [
+            zone
+            for zone, since in self.borders.items()
+            if since is not None and since > self.end_date
+        ]
+        if late_borders:
+            raise ValueError(f"Borders put in service after end_date: {late_borders}")
         return self
 
 
-class SparkSpreadConfig(BaseModel):
-    """Validates spark spread parameters."""
-
-    heat_rate: float = Field(..., gt=0, lt=10)
-
-
-class FeaturesConfig(BaseModel):
-    """Validates the features section."""
-
-    rolling_windows: RollingWindowsConfig
-    spark_spread: SparkSpreadConfig
-
-
-class HMMConfig(BaseModel):
-    """Validates the HMM section.
-
-    n_states must be between 2 and 10. BIC will select the
-    optimal number, but we validate the search range here.
-    """
-
-    n_states: int = Field(..., ge=2, le=10)
-    n_init: int = Field(..., ge=1)
-    covariance_type: Literal["full", "diag", "tied", "spherical"]
-    refit_frequency: str = Field(..., pattern=r"^(daily|weekly|monthly)$")
-    random_state: int
-    features: list[str]
-
-    @field_validator("features")
-    @classmethod
-    def features_not_empty(cls, v: list[str]) -> list[str]:
-        """HMM needs at least 2 features for multivariate analysis."""
-        if len(v) < 2:
-            raise ValueError("HMM requires at least 2 features")
-        return v
-
-
-class AnomalyConfig(BaseModel):
-    """Validates the anomaly detection section.
-
-    contamination=0.05 means 5% of hours are flagged as
-    anomalies. This is a BUSINESS choice: the procurement
-    team can handle ~5% alerts per day.
-    """
-
-    contamination: float = Field(..., gt=0, lt=0.5)
-    n_estimators: int = Field(..., gt=0)
-    min_samples_per_regime: int = Field(..., gt=0)
-    event_grouping_hours: int = Field(..., gt=0)
-    refit_frequency: str = Field(..., pattern=r"^(daily|weekly|monthly)$")
-    random_state: int
-    features: list[str]
-
-    @field_validator("features")
-    @classmethod
-    def features_not_empty(cls, v: list[str]) -> list[str]:
-        """Isolation Forest needs at least 1 feature."""
-        if len(v) < 1:
-            raise ValueError("anomaly_detection.features must not be empty")
-        return v
-
-
-class XGBoostConfig(BaseModel):
-    """Validates XGBoost hyperparameters."""
-
-    n_estimators: int = Field(..., gt=0)
-    learning_rate: float = Field(..., gt=0, lt=1)
-    max_depth: int = Field(..., gt=0, le=20)
-    early_stopping_rounds: int = Field(..., gt=0)
-    eval_metric: Literal["mae", "rmse", "mape", "logloss"]
-    random_state: int
-    validation_split: float = Field(..., gt=0, lt=1)
-
-
-class ModelBConfig(BaseModel):
-    """Validates Model B horizons."""
-
-    horizons: list[int]
-
-    @field_validator("horizons")
-    @classmethod
-    def horizons_positive(cls, v: list[int]) -> list[int]:
-        """All horizons must be positive and list must not be empty."""
-        if not v:
-            raise ValueError("horizons must not be empty")
-        for h in v:
-            if h < 1:
-                raise ValueError(f"Horizon must be >= 1, got {h}")
-        return v
-
-
-class PredictionConfig(BaseModel):
-    """Validates the prediction section."""
-
-    xgboost: XGBoostConfig
-    model_b: ModelBConfig
-
-
-class LightGBMQuantileConfig(BaseModel):
-    """Validates LightGBM quantile regression parameters."""
-
-    n_estimators: int = Field(..., gt=0)
-    learning_rate: float = Field(..., gt=0, lt=1)
-    num_leaves: int = Field(..., gt=1)
-    quantiles: list[float]
-    random_state: int
-
-    @field_validator("quantiles")
-    @classmethod
-    def quantiles_valid(cls, v: list[float]) -> list[float]:
-        """All quantiles must be between 0 and 1, list must not be empty."""
-        if not v:
-            raise ValueError("quantiles must not be empty")
-        for q in v:
-            if not 0 < q < 1:
-                raise ValueError(f"Quantile must be between 0 and 1, got {q}")
-        return v
-
-
-class AlertsConfig(BaseModel):
-    """Validates alert thresholds."""
-
-    p80_threshold: float = Field(..., ge=0, le=1)
-    p95_threshold: float = Field(..., ge=0, le=1)
-    top_cheap_hours: int = Field(..., gt=0)
-    top_expensive_hours: int = Field(..., gt=0)
-    shap_top_drivers: int = Field(..., gt=0)
-
-    @model_validator(mode="after")
-    def p95_greater_than_p80(self) -> AlertsConfig:
-        """p95 threshold must be strictly greater than p80."""
-        if self.p95_threshold <= self.p80_threshold:
-            raise ValueError(
-                f"p95_threshold ({self.p95_threshold}) must be > "
-                f"p80_threshold ({self.p80_threshold})"
-            )
-        return self
-
-
-class BacktestConfig(BaseModel):
-    """Validates backtest parameters."""
-
-    client_consumption_gwh_year: float = Field(..., gt=0)
-    flexible_share: float = Field(..., gt=0, le=1)
-    flexibility_window_hours: int = Field(..., gt=0)
-    assumed_project_cost_eur: float = Field(..., ge=0)
-    period_start: date
-    period_end: date
-
-    @field_validator("period_end")
-    @classmethod
-    def end_after_start(cls, v: date, info: Any) -> date:
-        """Ensure period_end is after period_start."""
-        if "period_start" in info.data and v <= info.data["period_start"]:
-            raise ValueError(
-                f"period_end ({v}) must be after period_start ({info.data['period_start']})"
-            )
-        return v
-
-
-class ProjectConfig(BaseModel):
-    """Top-level config that assembles all sub-configs.
-
-    This is the single entry point for validation. If ANY
-    parameter is invalid, the entire pipeline fails at startup.
-    """
+class ProjectConfig(StrictModel):
+    """All parameter sections. Each pipeline adds its own field in its commit."""
 
     ingestion: IngestionConfig
-    features: FeaturesConfig
-    hmm: HMMConfig
-    anomaly_detection: AnomalyConfig
-    prediction: PredictionConfig
-    lightgbm_quantile: LightGBMQuantileConfig
-    alerts: AlertsConfig
-    backtest: BacktestConfig
+
+
+def _is_entsoe_zone(code: str) -> bool:
+    """True if `code` is written like an ENTSO-E zone code."""
+    return re.fullmatch(ENTSOE_ZONE_PATTERN, code) is not None
+
+
+def _is_generation_column(name: str) -> bool:
+    """True if `name` follows the gen_<name>_mw convention."""
+    return re.fullmatch(GENERATION_COLUMN_PATTERN, name) is not None
 
 
 # ==================================================
-# Kedro hooks
+# Hooks
 # ==================================================
 
 
-class ValidateConfigHook:
-    """Validates parameters and credentials at startup.
-
-    Merged into a single hook to avoid creating a nested
-    KedroSession. The config_loader captured in
-    after_context_created is reused in before_pipeline_run.
-    """
-
-    def __init__(self) -> None:
-        self._config_loader: Any = None
+class ProjectHooks:
+    """Validates the parameters and provides the ENTSO-E key to the pipelines."""
 
     @hook_impl
     def after_context_created(self, context: Any) -> None:
-        """Validate parameters.yml against pydantic models."""
-        self._config_loader = context.config_loader
-        raw_params = self._config_loader["parameters"]
-
+        """Validate parameters.yml (with any --params overrides) before anything runs."""
         try:
-            validated = ProjectConfig(**raw_params)
-            logger.info(
-                "Parameters validated: country=%s, period=%s to %s, "
-                "hmm_states=%d, contamination=%.2f",
-                validated.ingestion.country,
-                validated.ingestion.start_date,
-                validated.ingestion.end_date,
-                validated.hmm.n_states,
-                validated.anomaly_detection.contamination,
-            )
-        except Exception as e:
-            raise ValueError(
-                f"Invalid parameters.yml — fix these errors before running:\n{e}"
-            ) from e
-
-        try:
-            globals_conf = self._config_loader["globals"]
-            globals_country = globals_conf.get("country")
-            params_country = validated.ingestion.country
-            if globals_country and globals_country != params_country:
-                raise ValueError(
-                    f"Dual source of truth: globals.yml has country='{globals_country}' "
-                    f"but parameters.yml has ingestion.country='{params_country}'. "
-                    f"These must match — globals.yml drives catalog paths, "
-                    f"parameters.yml drives fetcher logic."
-                )
-        except KeyError:
-            pass  # globals.yml not loaded yet — skip check
-
-    @hook_impl
-    def before_pipeline_run(self, run_params: dict[str, Any], pipeline: Any) -> None:
-        """Check credentials only if ingestion nodes are in the pipeline."""
-        node_names = [node.name for node in pipeline.nodes]
-
-        ingestion_prefixes = ("fetch_", "ingest_")
-        needs_credentials = any(
-            node_name.startswith(ingestion_prefixes) for node_name in node_names
+            config = ProjectConfig(**context.params)
+        except ValidationError as error:
+            raise ValueError(f"Invalid parameters.yml, fix these errors:\n{error}") from None
+        logger.info(
+            "Parameters validated: zone %s, delivery days %s to %s",
+            config.ingestion.country,
+            config.ingestion.start_date,
+            config.ingestion.end_date,
         )
 
-        if not needs_credentials:
-            logger.debug("No ingestion nodes — skipping credentials check")
+    @hook_impl
+    def after_catalog_created(self, catalog: Any, conf_creds: dict[str, Any]) -> None:
+        """Add the ENTSO-E key to the catalog, masked, when credentials.yml provides it.
+
+        `SecretStr` prints as '**********': if the key ever reaches a log or an
+        error message, it stays hidden. Nodes unmask it only to create the client.
+        """
+        has_key = bool(conf_creds) and bool(conf_creds.get(ENTSOE_API_KEY))
+        if not has_key:
             return
+        masked_key = SecretStr(str(conf_creds[ENTSOE_API_KEY]))
+        catalog.add_feed_dict({ENTSOE_API_KEY: masked_key}, replace=True)
 
-        try:
-            credentials = self._config_loader["credentials"]
-            api_key = credentials.get("entsoe_api_key", "")
-            if not api_key or api_key == "YOUR_ENTSOE_API_KEY_HERE":
-                raise ValueError(
-                    "ENTSOE_API_KEY is missing or still set to placeholder. "
-                    "Copy conf/local/credentials.yml.example to "
-                    "conf/local/credentials.yml and add your key. "
-                    "See: https://transparency.entsoe.eu/"
-                )
-            logger.info("ENTSO-E API key validated (length=%d)", len(api_key))
-        except KeyError as e:
-            raise ValueError(
-                "conf/local/credentials.yml not found. "
-                "Copy credentials.yml.example and add your ENTSO-E API key."
-            ) from e
+    @hook_impl
+    def before_pipeline_run(self, pipeline: Any, catalog: Any) -> None:
+        """Stop with a clear message if the pipeline needs the key and none was found."""
+        needs_key = ENTSOE_API_KEY in pipeline.inputs()
+        has_key = ENTSOE_API_KEY in catalog
+        if needs_key and not has_key:
+            raise ValueError(MISSING_KEY_MESSAGE)
 
 
 # ==================================================
-# Register hooks with Kedro
+# Kedro settings
 # ==================================================
 
-HOOKS = (ValidateConfigHook(),)
+HOOKS = (ProjectHooks(),)
 
-# CONFIG_LOADER_CLASS = OmegaConfigLoader
-
-# Keyword arguments to pass to the `CONFIG_LOADER_CLASS` constructor.
 CONFIG_LOADER_ARGS = {
     "base_env": "base",
     "default_run_env": "local",
-    # "config_patterns": {
-    #     "spark" : ["spark*/"],
-    #     "parameters": ["parameters*", "parameters*/**", "**/parameters*"],
-    # }
 }

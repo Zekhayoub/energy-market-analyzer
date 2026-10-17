@@ -19,25 +19,29 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = [
-    "E",    # pycodestyle errors
-    "W",    # pycodestyle warnings
-    "F",    # pyflakes
-    "I",    # isort
-    "UP",   # pyupgrade
-    "B",    # flake8-bugbear
-    "SIM",  # flake8-simplify
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "SIM",    # flake8-simplify
+    "S101",   # no assert in production code
+    "T20",    # no print
+    "BLE",    # no blind `except Exception`
+    "PD002",  # no inplace=True
+    "DTZ",    # no datetime without time zone
+    "PT",     # pytest style, including pytest.raises(..., match=...)
+    "TID251", # banned imports (see below)
 ]
 
-[tool.mypy]
-python_version = "3.12"
-warn_return_any = true
-warn_unused_configs = true
-ignore_missing_imports = true
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"src".msg = "Import from energy_market_analyzer, never from src."
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-markers = [
-    "integration: tests that require real Belgian data (deselect with '-m not integration')",
-]
 addopts = "-v --tb=short"

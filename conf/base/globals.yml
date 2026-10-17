@@ -1,26 +1,13 @@
 # ==================================================
-# GLOBALS — Reusable variables for catalog paths
+# GLOBALS — values shared by several pipelines
 # ==================================================
-# These variables are substituted in catalog.yml via
-# the ${globals:variable} syntax
+# Reused in parameters.yml with the ${globals:name} syntax,
+# so each value is written in exactly one place.
 # ==================================================
 
+# ENTSO-E bidding zone studied (Belgium).
 country: "BE"
 
-# weather_coordinates:
-#   BE:
-#     latitude: 50.85
-#     longitude: 4.35
-#     city: "Brussels"
-#   DE:
-#     latitude: 52.52
-#     longitude: 13.41
-#     city: "Berlin"
-#   FR:
-#     latitude: 48.85
-#     longitude: 2.35
-#     city: "Paris"
-#   NL:
-#     latitude: 52.37
-#     longitude: 4.89
-#     city: "Amsterdam"
+# Time zone of the market: delivery days, the 11:00 decision time
+# and calendar features are all expressed in this zone.
+market_timezone: "Europe/Brussels"

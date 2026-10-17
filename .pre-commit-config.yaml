@@ -1,20 +1,25 @@
+# Checks run on every `git commit` (install once with `pre-commit install`).
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.1.15
+    rev: v0.17.1  # keep equal to the ruff version in requirements.txt
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: [--fix]
       - id: ruff-format
 
-  # - repo: https://github.com/pre-commit/mirrors-mypy
-  #   rev: v1.8.0
-  #   hooks:
-  #     - id: mypy
-  #       additional_dependencies: [pydantic, types-PyYAML]
-
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.5.0
+    rev: v6.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+      # Data and models live in data/ (ignored by git); a large file is a mistake.
+      - id: check-added-large-files
+        args: [--maxkb=1000]
+
+  # Blocks any commit containing a secret, notebook outputs included.
+  # Rules: gitleaks defaults + the ENTSO-E key rule in .gitleaks.toml.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks

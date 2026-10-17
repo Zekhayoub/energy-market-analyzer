@@ -82,13 +82,14 @@ kedro viz                          # interactive DAG visualization
 
 ## 5. Data Sources
 
-| Source | Tool | Data | Frequency | Period | API Key |
-|--------|------|------|-----------|--------|---------|
-| ENTSO-E | `entsoe-py` | Day-ahead prices, generation by technology, load, bidirectional cross-border flows (BE↔FR, BE↔NL, BE↔DE) | Hourly | 2015–2026 | Yes (free) |
-| Yahoo Finance | `yfinance` | TTF natural gas (TTF=F), EU ETS carbon (^ICEEUA) | Daily | 2015–2026 | No |
-| Open-Meteo | `openmeteo-requests` | Temperature, wind speed (100m), solar radiation, cloud cover | Hourly | 2015–2026 | No |
+| Source | Tool | Data | Resolution | Period | API key |
+|--------|------|------|------------|--------|---------|
+| ENTSO-E Transparency Platform | `entsoe-py` | Day-ahead prices, actual load, day-ahead load forecast, generation by production type, physical cross-border flows with FR, NL, DE and GB (both directions) | 15 min or hourly | 2018–2026 | Yes (free) |
+| Yahoo Finance | `yfinance` | Dutch TTF natural gas, front-month future (`TTF=F`), EUR/MWh | Daily | 2018–2026 | No |
+| EEX | `requests` | EU allowance (EUA) primary auction clearing price, EUR/t | Auction days | 2018–2026 | No |
+| Open-Meteo (ERA5) | `requests` | Observed temperature, wind speed at 100 m, solar radiation, cloud cover (Brussels) | Hourly | 2018–2026 | No |
 
-All data is free. No manual CSV downloads — everything is fetched via APIs.
+All data is free and downloaded by the pipeline: no manual download.
 
 ---
 
@@ -131,43 +132,46 @@ Not a prediction model. HMM detects regimes and Isolation Forest detects anomali
 
 ### Prerequisites
 
-- Python 3.12+
-- An ENTSO-E API key
+- Python 3.12
+- A free ENTSO-E API key: create an account on the
+  [ENTSO-E Transparency Platform](https://transparency.entsoe.eu/) and request
+  access to the Restful API. The key (a UUID) then appears in your account settings.
 
-### Without Docker
+### Installation
 
 ```bash
 # 1. Clone
 git clone https://github.com/Zekhayoub/energy-market-analyzer.git
 cd energy-market-analyzer
 
-# 2. Install
+# 2. Create a virtual environment and install the exact versions
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-# 3. Configure credentials
-cp conf/local/credentials.yml.example conf/local/credentials.yml
-# Edit credentials.yml and paste your ENTSO-E API key
-
-# 4. Run
-kedro run                          # full pipeline
-kedro run --pipeline=inference     # production mode (predict + alert)
-kedro viz                          # visualize the DAG
-
-# 5. Tests
-pytest                             # unit tests only
-pytest -m integration              # integration tests (needs real data)
+# 3. Install the git hooks (ruff and the secret scan run on every commit)
+pre-commit install
 ```
 
-### With Docker
+### ENTSO-E API key
+
+Create the file `conf/local/credentials.yml` (git ignores everything in
+`conf/local/`) with a single line:
+
+```yaml
+entsoe_api_key: "<your key>"
+```
+
+Never paste the key anywhere else (notebook, log, issue, chat). The pipeline
+masks it in every log and error message, and gitleaks blocks any commit that
+contains it.
+
+### Run
 
 ```bash
-docker build -t energy-analyzer .
-docker run --rm \
-    -v $(pwd)/conf/local:/app/conf/local \
-    -v $(pwd)/data:/app/data \
-    energy-analyzer kedro run
+kedro run --pipeline=ingestion     # download the sources, build data/03_primary/master.parquet
+pytest                             # unit tests, no network call
 ```
-
 
 ---
 

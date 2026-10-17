@@ -1,142 +1,93 @@
 # ==================================================
 # PARAMETERS — Energy Market Analyzer
 # ==================================================
-# All project hyperparameters live here.
-# To change country: modify ingestion.country
-# To change period: modify ingestion.start_date/end_date
+# One top-level section per pipeline, validated at startup
+# by the pydantic models in settings.py (unknown keys are
+# rejected). Each pipeline adds its section in its commit.
 # ==================================================
-
 
 
 # --- Ingestion ---
 ingestion:
-  country: "BE"
-  start_date: "2015-01-01"
-  end_date: "2026-03-31"
-  neighbors:
-    - "FR"
-    - "NL"
-    - "DE_LU"
-  forward_fill_max_days: 3
+  country: ${globals:country}
+  market_timezone: ${globals:market_timezone}
+
+  # Delivery days, both included, in market time. Window common to all
+  # sources: Yahoo's TTF history starts at the end of 2017 (decision D8).
+  start_date: "2018-01-01"
+  end_date: "2026-09-30"
+
+  # First delivery day of the 15-minute day-ahead market (SDAC go-live).
+  # From this day on, an hourly price needs its 4 quarter-hours (decision D2).
+  quarter_hour_prices_from: "2025-10-01"
+
+  # Neighbouring ENTSO-E zones -> first day of commercial operation of the
+  # interconnector. null = in service before start_date. Before that day
+  # the flow is 0 by construction (decision D11).
+  borders:
+    FR: null
+    NL: null
+    DE_LU: "2020-11-18"  # ALEGrO
+    GB: "2019-01-31"     # Nemo Link
+
+  # ENTSO-E production types -> master columns (MW). A type not published
+  # during a whole year is 0 MW that year. Types not listed are dropped
+  # (and logged).
+  generation_columns:
+    Biomass: gen_biomass_mw
+    Energy storage: gen_storage_mw
+    Fossil Gas: gen_gas_mw
+    Fossil Hard coal: gen_coal_mw
+    Fossil Oil: gen_oil_mw
+    Hydro Pumped Storage: gen_hydro_pumped_mw
+    Hydro Run-of-river and pondage: gen_hydro_river_mw  # ENTSO-E spelling
+    Nuclear: gen_nuclear_mw
+    Other: gen_other_mw
+    Other renewable: gen_other_renewable_mw
+    Solar: gen_solar_mw
+    Waste: gen_waste_mw
+    Wind Offshore: gen_wind_offshore_mw
+    Wind Onshore: gen_wind_onshore_mw
+
+  # Units for which Elia publishes no value when they produce nothing: a missing
+  # hour is 0 MW when the generation document exists (decision D12). Evidence
+  # from run 1: offshore wind is missing at calm (3.4 m/s mean wind vs 6.9) and
+  # never published as 0; pumped storage is missing in cheap hours (75 vs
+  # 111 EUR/MWh), when it pumps or waits.
+  zero_when_unpublished:
+    - gen_wind_offshore_mw
+    - gen_hydro_pumped_mw
+
+  # Gas: front-month Dutch TTF future on Yahoo Finance (EUR/MWh, decision D4).
+  ttf_ticker: "TTF=F"
+
+  # Carbon: clearing price of the EEX primary auctions of general EU
+  # allowances (EUR/t, decision D4). Years up to eua_archive_last_year come
+  # from the archive, later years from one workbook per year.
+  eua_contract: "T3PA"
+  eua_archive_url: "https://www.eex.com/fileadmin/EEX/Downloads/Markets/Environmentals/EUA_Emission_Spot_Primary_Market_Auction_Report/Archive_Reports/emission-spot-primary-market-auction-report-2012-2025-data.zip"
+  eua_archive_last_year: 2025
+  eua_yearly_url: "https://public.eex-group.com/eex/eua-auction-report/emission-spot-primary-market-auction-report-{year}-data.xlsx"
+
+  # A daily history may start (or end) at most this many days after
+  # start_date (before end_date). Beyond that, ingestion stops.
+  max_history_gap_days: 7
+
+  # Observed weather (Open-Meteo archive). ERA5 keeps one model over the
+  # whole period. Brussels: one point, documented as a limit.
+  weather:
+    latitude: 50.85
+    longitude: 4.35
+    model: "era5"
+    archive_url: "https://archive-api.open-meteo.com/v1/archive"
+
+  # Length of one ENTSO-E request, in months. Must stay under 12: entsoe-py
+  # pads price requests by a day and loses the hour where it splits a request
+  # longer than a year.
+  entsoe_window_months: 6
+
+  # Network calls: attempts per request, first wait (doubled at each new
+  # attempt) and timeout of one request.
   retry_max_attempts: 3
-  retry_backoff_factor: 2
-  weather_coordinates:
-    BE: {latitude: 50.85, longitude: 4.35}
-    DE: {latitude: 52.52, longitude: 13.41}
-    FR: {latitude: 48.85, longitude: 2.35}
-    NL: {latitude: 52.37, longitude: 4.89}
-  expected_generation_techs:
-    - "Fossil Gas"
-    - "Wind Onshore"
-    - "Wind Offshore"
-    - "Solar"
-    - "Nuclear"
-    - "Biomass"
-    - "Hydro Run-of-river and poundage"
-    - "Hydro Pumped Storage"
-    - "Fossil Hard coal"
-    - "Fossil Oil"
-
-
-# --- Ingestion ---
-# ingestion:
-#   country: "BE"
-#   start_date: "2015-01-01"
-#   end_date: "2026-03-31"
-#   neighbors:
-#     - "FR"
-#     - "NL"
-#     - "DE_LU"
-#   forward_fill_max_days: 3
-#   retry_max_attempts: 3
-#   retry_backoff_factor: 2
-
-
-
-# --- Features ---
-features:
-  rolling_windows:
-    short: 24      # 1 day
-    medium: 168    # 1 week
-    long: 720      # 1 month
-  spark_spread:
-    heat_rate: 2.0  # Typical CCGT efficiency (simplified)
-
-# --- HMM (Hidden Markov Model) ---
-hmm:
-  n_states: 3           # calm, volatile, crisis
-  n_init: 50            # Number of initializations for convergence
-  covariance_type: "full"  # "full" default, fallback "diag" if singular
-  refit_frequency: "monthly"
-  random_state: 42
-  features:
-    - "price_return"
-    - "price_volatility_24h"
-    - "gas_share"
-    - "spark_spread"
-
-
-# --- Anomaly Detection (Isolation Forest) ---
-anomaly_detection:
-  contamination: 0.05         # 5% — business choice, not statistical
-  n_estimators: 200
-  min_samples_per_regime: 500  # Below this, fallback to merge or global
-  event_grouping_hours: 5      # Typical shock 3-6h, compromise at 5
-  refit_frequency: "monthly"   # Consistent with HMM
-  random_state: 42
-  features:
-    - "price_return"
-    - "price_volatility_24h"
-    - "gas_share"
-    - "spark_spread"
-    - "load_zscore_24h"
-    - "ttf_price"
-
-
-# --- Prediction (XGBoost) ---
-prediction:
-  xgboost:
-    n_estimators: 1000
-    learning_rate: 0.05
-    max_depth: 6
-    early_stopping_rounds: 50
-    eval_metric: "mae"
-    random_state: 42
-    validation_split: 0.8   # First 80% chronological, last 20% validation.
-
-  model_b:
-    horizons:
-      - 2   # J+2
-      - 3   # J+3
-      - 4   # J+4
-
-
-# --- LightGBM Quantile ---
-lightgbm_quantile:
-  n_estimators: 500
-  learning_rate: 0.05
-  num_leaves: 31
-  quantiles:
-    - 0.1    # q10 (lower bound)
-    - 0.5    # q50 (median)
-    - 0.9    # q90 (upper bound)
-  random_state: 42
-
-
-# --- Alerts ---
-alerts:
-  p80_threshold: 0.80
-  p95_threshold: 0.95
-  top_cheap_hours: 8
-  top_expensive_hours: 4
-  shap_top_drivers: 3
-
-
-# --- Backtest ---
-backtest:
-  client_consumption_gwh_year: 100
-  flexible_share: 0.10          # 10% of consumption is flexible
-  flexibility_window_hours: 4   # Shift +-4h
-  assumed_project_cost_eur: 30000
-  period_start: "2024-01-01"
-  period_end: "2026-03-31"
+  retry_backoff_seconds: 5
+  http_timeout_seconds: 120

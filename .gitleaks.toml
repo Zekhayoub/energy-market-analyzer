@@ -1,0 +1,16 @@
+# Secret scan used by the gitleaks pre-commit hook.
+# Default gitleaks rules + one rule for the ENTSO-E Transparency Platform key.
+
+title = "Energy Market Analyzer secret scan"
+
+[extend]
+useDefault = true
+
+# An ENTSO-E key is a UUID. It is caught next to the names it travels under:
+# the `securityToken` URL parameter, or an `entsoe_api_key` / `ENTSOE_API_KEY` setting.
+[[rules]]
+id = "entsoe-api-key"
+description = "ENTSO-E Transparency Platform security token"
+regex = '''(?i)(?:securitytoken|entsoe[_-]?api[_-]?key)["']?\s*[:=]\s*["']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'''
+secretGroup = 1
+keywords = ["securitytoken", "entsoe"]
