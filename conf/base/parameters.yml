@@ -133,3 +133,41 @@ features:
 
   # Model B: days between the decision day and the predicted day.
   multi_day_horizons: [2, 3, 4]
+
+
+# --- Regime ---
+# Gaussian HMM on one observation per day (mean price, volatility, mean clean
+# spark spread), all known the day before. Filtered regime: monthly refit on
+# the past, forward algorithm (models A and B, alerts, Isolation Forest).
+# Smoothed regime: whole period, retrospective analysis only (decision D6).
+regime:
+  market_timezone: ${globals:market_timezone}
+  holdout_start: ${globals:holdout_start}
+
+  # One name per state, in order of increasing volatility; their number is the
+  # number of states. Changing it changes every later pipeline: decide it on
+  # the "choices_before_holdout" section of regime_report.json only.
+  regime_names: [calm, volatile, crisis]
+
+  # Numbers of states whose BIC is reported (fitted before holdout_start).
+  bic_candidate_states: [2, 3, 4, 5]
+
+  # Months of data before the first filtered regime: with data from January
+  # 2018, the first refit is on 1 January 2019.
+  min_train_months: 12
+
+  # "full" keeps the correlations between the three observations; min_covar
+  # (on standardized inputs) keeps every covariance matrix invertible.
+  covariance_type: full
+  min_covar: 0.001
+
+  # EM: starts per fit (the previous month's model is one of them), maximum
+  # iterations, and the gain of log-likelihood under which EM has converged.
+  n_init: 10
+  n_iter: 500
+  tol: 0.001
+
+  # Seed of the first random start (start k uses seed + k). The stability
+  # check refits the development model from the other seeds.
+  random_state: 42
+  stability_seeds: [123, 456]

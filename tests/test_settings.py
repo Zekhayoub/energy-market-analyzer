@@ -22,6 +22,23 @@ def _project_parameters() -> dict[str, Any]:
     return loader["parameters"]
 
 
+def _with_section(section: str, change: dict[str, Any]) -> dict[str, Any]:
+    """The real parameters with `change` applied to one section."""
+    parameters = _project_parameters()
+    changed_section = {**parameters[section], **change}
+    return {**parameters, section: changed_section}
+
+
+def _assert_only_error(parameters: dict[str, Any], message: str) -> None:
+    """Validation fails with exactly one error, matching `message`.
+
+    One error only: the test cannot pass because of another problem.
+    """
+    with pytest.raises(ValidationError, match=message) as error:
+        ProjectConfig(**parameters)
+    assert error.value.error_count() == 1
+
+
 def test_project_parameters_are_valid() -> None:
     """The real parameters.yml passes the validation run at every Kedro start."""
     config = ProjectConfig(**_project_parameters())
@@ -29,28 +46,22 @@ def test_project_parameters_are_valid() -> None:
     assert config.ingestion.country == "BE"
     assert config.ingestion.start_date < config.ingestion.end_date
     assert config.ingestion.start_date < config.features.holdout_start
+    assert config.regime.holdout_start == config.features.holdout_start
+    assert len(config.regime.regime_names) in config.regime.bic_candidate_states
 
 
 def test_unknown_parameter_is_rejected() -> None:
     """A typo in a key name stops the run instead of being silently ignored."""
-    parameters = _project_parameters()
-    ingestion_with_typo = {**parameters["ingestion"], "start_dat": "2018-01-01"}
+    parameters = _with_section("ingestion", {"start_dat": "2018-01-01"})
 
-    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        ProjectConfig(ingestion=ingestion_with_typo, features=parameters["features"])
+    _assert_only_error(parameters, "Extra inputs are not permitted")
 
 
 def test_end_date_before_start_date_is_rejected() -> None:
     """A reversed period is rejected with a message naming both dates."""
-    parameters = _project_parameters()
-    reversed_period = {
-        **parameters["ingestion"],
-        "start_date": "2026-09-30",
-        "end_date": "2018-01-01",
-    }
+    parameters = _with_section("ingestion", {"start_date": "2026-09-30", "end_date": "2018-01-01"})
 
-    with pytest.raises(ValidationError, match="end_date .* must not be before start_date"):
-        ProjectConfig(ingestion=reversed_period, features=parameters["features"])
+    _assert_only_error(parameters, "end_date .* must not be before start_date")
 
 
 @pytest.mark.parametrize(
@@ -63,8 +74,24 @@ def test_end_date_before_start_date_is_rejected() -> None:
 )
 def test_inconsistent_features_section_is_rejected(change: dict[str, Any], message: str) -> None:
     """A column the ingestion does not produce, J+1 in model B or a typo in the heat rate."""
-    parameters = _project_parameters()
-    features = {**parameters["features"], **change}
+    parameters = _with_section("features", change)
 
-    with pytest.raises(ValidationError, match=message):
-        ProjectConfig(ingestion=parameters["ingestion"], features=features)
+    _assert_only_error(parameters, message)
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (
+            {"regime_names": ["calm", "volatile", "crisis", "panic", "extreme", "chaos"]},
+            "bic_candidate_states must include the number of regime_names \\(6\\)",
+        ),
+        ({"holdout_start": "2025-07-01"}, "same holdout_start"),
+        ({"stability_seeds": [45]}, "at least n_init \\(10\\) apart"),
+    ],
+)
+def test_inconsistent_regime_section_is_rejected(change: dict[str, Any], message: str) -> None:
+    """A number of states without a BIC, a different reserved period, overlapping seeds."""
+    parameters = _with_section("regime", change)
+
+    _assert_only_error(parameters, message)

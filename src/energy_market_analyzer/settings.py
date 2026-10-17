@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import holidays
@@ -46,6 +46,10 @@ HTTPS_URL_PATTERN = r"^https://"
 # predicted day one week before must be known on the decision day.
 MIN_MULTI_DAY_HORIZON = 2
 MAX_MULTI_DAY_HORIZON = 7
+# Regime names become column suffixes (prob_filtered_<name>); an HMM needs 2 states or more.
+REGIME_NAME_PATTERN = r"^[a-z][a-z0-9_]*$"
+MIN_REGIME_STATES = 2
+MONTHS_PER_YEAR = 12
 
 
 # ==================================================
@@ -209,31 +213,121 @@ class FeaturesConfig(StrictModel):
         return [self.gas_column, self.nuclear_column, *self.wind_solar_columns]
 
 
+class RegimeConfig(StrictModel):
+    """Validates the `regime` section of parameters.yml."""
+
+    market_timezone: str
+    holdout_start: date
+    regime_names: list[str] = Field(..., min_length=MIN_REGIME_STATES)
+    bic_candidate_states: list[int] = Field(..., min_length=1)
+    min_train_months: int = Field(..., ge=1)
+    covariance_type: Literal["full", "diag"]
+    min_covar: float = Field(..., gt=0)
+    n_init: int = Field(..., ge=1)
+    n_iter: int = Field(..., ge=1)
+    tol: float = Field(..., gt=0)
+    random_state: int = Field(..., ge=0)
+    stability_seeds: list[int] = Field(..., min_length=1)
+
+    @field_validator("market_timezone")
+    @classmethod
+    def timezone_exists(cls, value: str) -> str:
+        """Reject a time zone name that the tz database does not know."""
+        return _known_timezone(value)
+
+    @field_validator("regime_names")
+    @classmethod
+    def names_are_column_suffixes(cls, value: list[str]) -> list[str]:
+        """Each name ends a column name (prob_filtered_<name>): lowercase and unique."""
+        invalid_names = [name for name in value if not re.fullmatch(REGIME_NAME_PATTERN, name)]
+        if invalid_names:
+            raise ValueError(f"regime_names must be lowercase identifiers: {invalid_names}")
+        if len(set(value)) < len(value):
+            raise ValueError(f"regime_names lists a name twice: {value}")
+        return value
+
+    @field_validator("bic_candidate_states")
+    @classmethod
+    def candidates_are_hmms(cls, value: list[int]) -> list[int]:
+        """An HMM has at least 2 states; each candidate appears once."""
+        if min(value) < MIN_REGIME_STATES:
+            raise ValueError(f"bic_candidate_states must be at least {MIN_REGIME_STATES}: {value}")
+        if len(set(value)) < len(value):
+            raise ValueError(f"bic_candidate_states lists a number twice: {value}")
+        return value
+
+    @model_validator(mode="after")
+    def states_and_seeds_agree(self) -> RegimeConfig:
+        """The configured number of states has a BIC; random starts of the seeds never overlap."""
+        n_states = len(self.regime_names)
+        if n_states not in self.bic_candidate_states:
+            raise ValueError(
+                f"bic_candidate_states must include the number of regime_names ({n_states})"
+            )
+        seeds = sorted([self.random_state, *self.stability_seeds])
+        gaps = [later - earlier for earlier, later in zip(seeds, seeds[1:], strict=False)]
+        if min(gaps) < self.n_init:
+            raise ValueError(
+                f"random_state and stability_seeds must be at least n_init ({self.n_init}) "
+                f"apart, else their random starts overlap: {seeds}"
+            )
+        return self
+
+
 class ProjectConfig(StrictModel):
     """All parameter sections. Each pipeline adds its own field in its commit."""
 
     ingestion: IngestionConfig
     features: FeaturesConfig
+    regime: RegimeConfig
 
     @model_validator(mode="after")
     def sections_agree(self) -> ProjectConfig:
-        """Features read columns the ingestion produces, in the same time zone and period."""
-        produced_columns = set(self.ingestion.generation_columns.values())
-        unknown_columns = sorted(set(self.features.generation_columns()) - produced_columns)
-        if unknown_columns:
-            raise ValueError(
-                f"features reads generation columns that ingestion does not produce: "
-                f"{unknown_columns}"
-            )
-        if self.features.market_timezone != self.ingestion.market_timezone:
-            raise ValueError("features and ingestion must use the same market_timezone")
-        holdout_start = self.features.holdout_start
-        is_inside_period = self.ingestion.start_date < holdout_start <= self.ingestion.end_date
-        if not is_inside_period:
-            raise ValueError(
-                f"holdout_start ({holdout_start}) must fall after start_date and not after end_date"
-            )
+        """Later sections read what earlier ones produce, in the same time zone and period."""
+        _features_agree(self.ingestion, self.features)
+        _regime_agrees(self.ingestion, self.features, self.regime)
         return self
+
+
+def _features_agree(ingestion: IngestionConfig, features: FeaturesConfig) -> None:
+    """Features read columns the ingestion produces, in the same time zone and period."""
+    produced_columns = set(ingestion.generation_columns.values())
+    unknown_columns = sorted(set(features.generation_columns()) - produced_columns)
+    if unknown_columns:
+        raise ValueError(
+            f"features reads generation columns that ingestion does not produce: {unknown_columns}"
+        )
+    if features.market_timezone != ingestion.market_timezone:
+        raise ValueError("features and ingestion must use the same market_timezone")
+    holdout_start = features.holdout_start
+    is_inside_period = ingestion.start_date < holdout_start <= ingestion.end_date
+    if not is_inside_period:
+        raise ValueError(
+            f"holdout_start ({holdout_start}) must fall after start_date and not after end_date"
+        )
+
+
+def _regime_agrees(
+    ingestion: IngestionConfig, features: FeaturesConfig, regime: RegimeConfig
+) -> None:
+    """Same time zone and reserved period as the features; a first refit before the holdout."""
+    if regime.market_timezone != ingestion.market_timezone:
+        raise ValueError("regime and ingestion must use the same market_timezone")
+    if regime.holdout_start != features.holdout_start:
+        raise ValueError(
+            f"regime and features must use the same holdout_start "
+            f"({regime.holdout_start} vs {features.holdout_start})"
+        )
+    start = ingestion.start_date
+    holdout_start = regime.holdout_start
+    months_before_holdout = (
+        (holdout_start.year - start.year) * MONTHS_PER_YEAR + holdout_start.month - start.month
+    )
+    if regime.min_train_months >= months_before_holdout:
+        raise ValueError(
+            f"min_train_months ({regime.min_train_months}) leaves no filtered month before "
+            f"holdout_start ({months_before_holdout} months of data before it)"
+        )
 
 
 def _known_timezone(value: str) -> str:

@@ -68,6 +68,12 @@ features_model_c:
   type: pandas.ParquetDataset
   filepath: data/04_feature/features_model_c.parquet
 
+# Regimes: one row per calendar day in Brussels. Filtered regime (past only)
+# for predictions and anomalies; smoothed regime for retrospective analysis.
+regimes:
+  type: pandas.ParquetDataset
+  filepath: data/04_feature/regimes.parquet
+
 
 # === 08_reporting ===
 
@@ -78,3 +84,7 @@ data_quality_report:
 features_report:
   type: json.JSONDataset
   filepath: data/08_reporting/features_report.json
+
+regime_report:
+  type: json.JSONDataset
+  filepath: data/08_reporting/regime_report.json

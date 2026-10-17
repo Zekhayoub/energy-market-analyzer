@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from energy_market_analyzer.pipelines.features.nodes import DAY
 from energy_market_analyzer.pipelines.ingestion.nodes import (
     EUA,
     LOAD,
@@ -25,6 +26,11 @@ from energy_market_analyzer.pipelines.ingestion.nodes import (
     delivery_period,
     flow_column,
 )
+from energy_market_analyzer.pipelines.regime.nodes import (
+    CLEAN_SPARK_SPREAD_MEAN,
+    PRICE_CHANGE_STD,
+    PRICE_MEAN,
+)
 
 GENERATION_COLUMNS = {
     "Fossil Gas": "gen_gas_mw",
@@ -35,6 +41,23 @@ GENERATION_COLUMNS = {
 }
 QUARTER_HOUR = "15min"
 RANDOM_SEED = 42
+REGIME_NAMES = ["calm", "volatile", "crisis"]
+# Daily observations of three synthetic regimes, in order of increasing volatility:
+# (mean, standard deviation). The volatility is drawn on the log(1 + value) scale
+# the HMM uses, so each regime is exactly Gaussian for the HMM.
+SYNTHETIC_REGIMES = (
+    {PRICE_MEAN: (45.0, 8.0), PRICE_CHANGE_STD: (6.0, 0.25), CLEAN_SPARK_SPREAD_MEAN: (12.0, 5.0)},
+    {
+        PRICE_MEAN: (85.0, 15.0),
+        PRICE_CHANGE_STD: (20.0, 0.25),
+        CLEAN_SPARK_SPREAD_MEAN: (25.0, 10.0),
+    },
+    {
+        PRICE_MEAN: (230.0, 50.0),
+        PRICE_CHANGE_STD: (60.0, 0.25),
+        CLEAN_SPARK_SPREAD_MEAN: (70.0, 30.0),
+    },
+)
 
 
 def make_ingestion_params(**overrides: Any) -> dict[str, Any]:
@@ -210,3 +233,62 @@ def make_master(start_date: str, end_date: str) -> pd.DataFrame:
     params = make_ingestion_params(start_date=start_date, end_date=end_date)
     sources = make_raw_sources(params)
     return build_master(**sources, params=params)
+
+
+def make_regime_params(**overrides: Any) -> dict[str, Any]:
+    """Regime parameters for tests: few starts and short training, to stay fast.
+
+    Args:
+        **overrides: Keys to replace, e.g. random_state=50.
+
+    Returns:
+        A dict shaped like the `regime` section of parameters.yml.
+    """
+    base_params = {
+        "market_timezone": "Europe/Brussels",
+        "holdout_start": "2020-01-01",
+        "regime_names": REGIME_NAMES,
+        "bic_candidate_states": [2, 3, 4],
+        "min_train_months": 6,
+        "covariance_type": "full",
+        "min_covar": 0.001,
+        "n_init": 3,
+        "n_iter": 200,
+        "tol": 0.001,
+        "random_state": 0,
+        "stability_seeds": [100],
+    }
+    return {**base_params, **overrides}
+
+
+def _draw_observation(column: str, true_states: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """One observation of each day, drawn from the regime of that day."""
+    means = np.array([regime[column][0] for regime in SYNTHETIC_REGIMES])[true_states]
+    deviations = np.array([regime[column][1] for regime in SYNTHETIC_REGIMES])[true_states]
+    if column != PRICE_CHANGE_STD:
+        return rng.normal(means, deviations)
+    log_volatility = rng.normal(np.log1p(means), deviations)
+    return np.expm1(log_volatility)
+
+
+def make_regime_observations(
+    states: list[int], block_days: int, start_day: str = "2019-01-01"
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Daily HMM observations drawn from known regimes, one block of days per entry of `states`.
+
+    Args:
+        states: Regime of each block (0 = calm, 1 = volatile, 2 = crisis).
+        block_days: Days per block.
+        start_day: First calendar day.
+
+    Returns:
+        The observations, shaped like the output of `build_regime_observations`,
+        and the true regime of each day.
+    """
+    rng = np.random.default_rng(RANDOM_SEED)
+    true_states = np.repeat(states, block_days)
+    days = pd.date_range(start_day, periods=len(true_states), freq="D", name=DAY)
+    observations = {
+        column: _draw_observation(column, true_states, rng) for column in SYNTHETIC_REGIMES[0]
+    }
+    return pd.DataFrame(observations, index=days), true_states
