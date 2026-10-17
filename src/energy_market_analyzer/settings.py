@@ -18,6 +18,7 @@ from datetime import date
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import holidays
 from kedro.framework.hooks import hook_impl
 from pydantic import (
     BaseModel,
@@ -41,6 +42,10 @@ MISSING_KEY_MESSAGE = (
 ENTSOE_ZONE_PATTERN = r"^[A-Z]{2}(_[A-Z]{2,3})*$"
 GENERATION_COLUMN_PATTERN = r"^gen_[a-z0-9_]+_mw$"
 HTTPS_URL_PATTERN = r"^https://"
+# Model B predicts from J+2 on: J+1 is model A. Up to J+7: the price of the
+# predicted day one week before must be known on the decision day.
+MIN_MULTI_DAY_HORIZON = 2
+MAX_MULTI_DAY_HORIZON = 7
 
 
 # ==================================================
@@ -90,11 +95,7 @@ class IngestionConfig(StrictModel):
     @classmethod
     def timezone_exists(cls, value: str) -> str:
         """Reject a time zone name that the tz database does not know."""
-        try:
-            ZoneInfo(value)
-        except ZoneInfoNotFoundError as error:
-            raise ValueError(f"Unknown time zone '{value}'") from error
-        return value
+        return _known_timezone(value)
 
     @field_validator("borders")
     @classmethod
@@ -144,10 +145,104 @@ class IngestionConfig(StrictModel):
         return self
 
 
+class FeaturesConfig(StrictModel):
+    """Validates the `features` section of parameters.yml."""
+
+    market_timezone: str
+    holdout_start: date
+    holiday_country: str = Field(..., min_length=2)
+    gas_column: str = Field(..., pattern=GENERATION_COLUMN_PATTERN)
+    nuclear_column: str = Field(..., pattern=GENERATION_COLUMN_PATTERN)
+    wind_solar_columns: list[str] = Field(..., min_length=1)
+    ttf_max_age_days: int = Field(..., ge=1)
+    eua_max_age_days: int = Field(..., ge=1)
+    # Realistic gas plants: 1.6 (60 % efficiency) to 2.9 (35 %); catches typos like 20.
+    heat_rate: float = Field(..., ge=1.5, le=3.5)
+    emission_factor_t_per_mwh_gas: float = Field(..., gt=0, le=0.5)
+    volatility_window_hours: int = Field(..., ge=2)
+    multi_day_horizons: list[int] = Field(..., min_length=1)
+
+    @field_validator("market_timezone")
+    @classmethod
+    def timezone_exists(cls, value: str) -> str:
+        """Reject a time zone name that the tz database does not know."""
+        return _known_timezone(value)
+
+    @field_validator("holiday_country")
+    @classmethod
+    def holiday_calendar_exists(cls, value: str) -> str:
+        """Reject a country code that the `holidays` package does not know."""
+        try:
+            holidays.country_holidays(value)
+        except NotImplementedError as error:
+            raise ValueError(f"No public holiday calendar for '{value}'") from error
+        return value
+
+    @field_validator("wind_solar_columns")
+    @classmethod
+    def wind_solar_columns_are_generation(cls, value: list[str]) -> list[str]:
+        """Each column must follow gen_<name>_mw and appear only once."""
+        invalid_names = [name for name in value if not _is_generation_column(name)]
+        if invalid_names:
+            raise ValueError(f"wind_solar_columns must look like gen_<name>_mw: {invalid_names}")
+        if len(set(value)) < len(value):
+            raise ValueError("wind_solar_columns lists a column twice")
+        return value
+
+    @field_validator("multi_day_horizons")
+    @classmethod
+    def horizons_fit_model_b(cls, value: list[int]) -> list[int]:
+        """Model B covers J+2 to J+7 (J+1 is model A); each horizon appears once."""
+        is_too_short = min(value) < MIN_MULTI_DAY_HORIZON
+        is_too_long = max(value) > MAX_MULTI_DAY_HORIZON
+        if is_too_short or is_too_long:
+            raise ValueError(
+                f"multi_day_horizons must lie between {MIN_MULTI_DAY_HORIZON} (J+1 is model A) "
+                f"and {MAX_MULTI_DAY_HORIZON} (week-ago price known on the decision day): {value}"
+            )
+        if len(set(value)) < len(value):
+            raise ValueError(f"multi_day_horizons lists a horizon twice: {value}")
+        return value
+
+    def generation_columns(self) -> list[str]:
+        """Every master generation column the features read."""
+        return [self.gas_column, self.nuclear_column, *self.wind_solar_columns]
+
+
 class ProjectConfig(StrictModel):
     """All parameter sections. Each pipeline adds its own field in its commit."""
 
     ingestion: IngestionConfig
+    features: FeaturesConfig
+
+    @model_validator(mode="after")
+    def sections_agree(self) -> ProjectConfig:
+        """Features read columns the ingestion produces, in the same time zone and period."""
+        produced_columns = set(self.ingestion.generation_columns.values())
+        unknown_columns = sorted(set(self.features.generation_columns()) - produced_columns)
+        if unknown_columns:
+            raise ValueError(
+                f"features reads generation columns that ingestion does not produce: "
+                f"{unknown_columns}"
+            )
+        if self.features.market_timezone != self.ingestion.market_timezone:
+            raise ValueError("features and ingestion must use the same market_timezone")
+        holdout_start = self.features.holdout_start
+        is_inside_period = self.ingestion.start_date < holdout_start <= self.ingestion.end_date
+        if not is_inside_period:
+            raise ValueError(
+                f"holdout_start ({holdout_start}) must fall after start_date and not after end_date"
+            )
+        return self
+
+
+def _known_timezone(value: str) -> str:
+    """Return `value` if the tz database knows it, else raise ValueError."""
+    try:
+        ZoneInfo(value)
+    except ZoneInfoNotFoundError as error:
+        raise ValueError(f"Unknown time zone '{value}'") from error
+    return value
 
 
 def _is_entsoe_zone(code: str) -> bool:
@@ -176,10 +271,11 @@ class ProjectHooks:
         except ValidationError as error:
             raise ValueError(f"Invalid parameters.yml, fix these errors:\n{error}") from None
         logger.info(
-            "Parameters validated: zone %s, delivery days %s to %s",
+            "Parameters validated: zone %s, delivery days %s to %s, reserved period from %s",
             config.ingestion.country,
             config.ingestion.start_date,
             config.ingestion.end_date,
+            config.features.holdout_start,
         )
 
     @hook_impl

@@ -11,3 +11,8 @@ country: "BE"
 # Time zone of the market: delivery days, the 11:00 decision time
 # and calendar features are all expressed in this zone.
 market_timezone: "Europe/Brussels"
+
+# First delivery day of the reserved final period (decision D9): from this
+# day to the end of the data, nothing is chosen or fitted by looking at it.
+# Reports that help choose (correlations, stationarity) stop the day before.
+holdout_start: "2025-10-01"

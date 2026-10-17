@@ -22,6 +22,8 @@ xlrd==2.0.2
 pandas==2.3.3
 numpy==2.3.5
 pyarrow==26.0.0
+# Belgian public holidays for the calendar features (only depends on python-dateutil).
+holidays==0.106
 
 # === Machine learning (versions reviewed again at the commit that uses them) ===
 hmmlearn==0.3.3

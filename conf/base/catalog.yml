@@ -51,8 +51,30 @@ master:
   filepath: data/03_primary/master.parquet
 
 
+# === 04_feature: one feature table per strategy ===
+
+# Model A: one row per delivered hour (UTC), features known at 11:00 the day before.
+features_model_a:
+  type: pandas.ParquetDataset
+  filepath: data/04_feature/features_model_a.parquet
+
+# Model B: one row per (decision_day, horizon_days), calendar days in Brussels.
+features_model_b:
+  type: pandas.ParquetDataset
+  filepath: data/04_feature/features_model_b.parquet
+
+# Model C: one row per hour (UTC), causal, for regimes and anomalies.
+features_model_c:
+  type: pandas.ParquetDataset
+  filepath: data/04_feature/features_model_c.parquet
+
+
 # === 08_reporting ===
 
 data_quality_report:
   type: json.JSONDataset
   filepath: data/08_reporting/data_quality_report.json
+
+features_report:
+  type: json.JSONDataset
+  filepath: data/08_reporting/features_report.json

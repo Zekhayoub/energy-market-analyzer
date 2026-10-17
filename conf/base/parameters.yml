@@ -91,3 +91,45 @@ ingestion:
   retry_max_attempts: 3
   retry_backoff_seconds: 5
   http_timeout_seconds: 120
+
+
+# --- Features ---
+# One table per strategy (decisions.md, section 6). Models A and B only see
+# what is known at 11:00 Brussels on the decision day; table C is hourly and
+# causal (the value of hour t only uses data up to t).
+features:
+  market_timezone: ${globals:market_timezone}
+  holdout_start: ${globals:holdout_start}
+
+  # Public holidays of this country (`holidays` package code) mark the
+  # calendar of the predicted day.
+  holiday_country: "BE"
+
+  # Master columns used for the ratios to load. Ratios are taken to the load,
+  # not to total generation: the total depends on irregularly published types
+  # ("Other" almost empty in 2021-2022, moved to biomass).
+  gas_column: gen_gas_mw
+  nuclear_column: gen_nuclear_mw
+  wind_solar_columns:
+    - gen_wind_onshore_mw
+    - gen_wind_offshore_mw
+    - gen_solar_mw
+
+  # Gas and carbon: last price strictly before the reference day, used at
+  # most this many days after its session, NaN beyond. Gas: weekends and
+  # holidays. Carbon: longest EEX auction pause is 46 days (January 2021,
+  # start of phase 4).
+  ttf_max_age_days: 7
+  eua_max_age_days: 50
+
+  # Clean spark spread = price - heat_rate x TTF - heat_rate x emission
+  # factor x EUA (decision D7). Heat rate 2.0 = 50 % efficiency; natural gas
+  # emits 0.202 tCO2 per MWh of gas burnt.
+  heat_rate: 2.0
+  emission_factor_t_per_mwh_gas: 0.202
+
+  # Table C: standard deviation of the hourly price changes over this window.
+  volatility_window_hours: 24
+
+  # Model B: days between the decision day and the predicted day.
+  multi_day_horizons: [2, 3, 4]

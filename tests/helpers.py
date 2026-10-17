@@ -21,6 +21,7 @@ from energy_market_analyzer.pipelines.ingestion.nodes import (
     TRADING_DATE,
     TTF,
     WEATHER_VARIABLES,
+    build_master,
     delivery_period,
     flow_column,
 )
@@ -28,6 +29,7 @@ from energy_market_analyzer.pipelines.ingestion.nodes import (
 GENERATION_COLUMNS = {
     "Fossil Gas": "gen_gas_mw",
     "Nuclear": "gen_nuclear_mw",
+    "Wind Onshore": "gen_wind_onshore_mw",
     "Wind Offshore": "gen_wind_offshore_mw",
     "Solar": "gen_solar_mw",
 }
@@ -167,3 +169,44 @@ def make_raw_sources(params: dict[str, Any]) -> dict[str, pd.DataFrame]:
         "eua": _daily_prices(params, EUA, level=70.0),
         "weather": pd.DataFrame(weather, index=weather_hours),
     }
+
+
+def make_features_params(**overrides: Any) -> dict[str, Any]:
+    """Features parameters for tests, shaped like the `features` section of parameters.yml.
+
+    Args:
+        **overrides: Keys to replace, e.g. eua_max_age_days=3.
+
+    Returns:
+        A dict of features parameters.
+    """
+    base_params = {
+        "market_timezone": "Europe/Brussels",
+        "holdout_start": "2025-10-01",
+        "holiday_country": "BE",
+        "gas_column": "gen_gas_mw",
+        "nuclear_column": "gen_nuclear_mw",
+        "wind_solar_columns": ["gen_wind_onshore_mw", "gen_wind_offshore_mw", "gen_solar_mw"],
+        "ttf_max_age_days": 7,
+        "eua_max_age_days": 50,
+        "heat_rate": 2.0,
+        "emission_factor_t_per_mwh_gas": 0.202,
+        "volatility_window_hours": 24,
+        "multi_day_horizons": [2, 3, 4],
+    }
+    return {**base_params, **overrides}
+
+
+def make_master(start_date: str, end_date: str) -> pd.DataFrame:
+    """Hourly master table of the period, built by the real `build_master` from synthetic sources.
+
+    Args:
+        start_date: First delivery day (Brussels), e.g. "2025-10-20".
+        end_date: Last delivery day (Brussels), included.
+
+    Returns:
+        The master table, as the ingestion pipeline writes it.
+    """
+    params = make_ingestion_params(start_date=start_date, end_date=end_date)
+    sources = make_raw_sources(params)
+    return build_master(**sources, params=params)
