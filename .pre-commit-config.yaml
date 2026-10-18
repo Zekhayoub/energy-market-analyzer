@@ -17,9 +17,15 @@ repos:
       - id: check-added-large-files
         args: [--maxkb=1000]
 
-  # Blocks any commit containing a secret, notebook outputs included.
-  # Rules: gitleaks defaults + the ENTSO-E key rule in .gitleaks.toml.
-  - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.30.1
+  # Blocks any commit containing the ENTSO-E key (the project's only secret),
+  # notebook outputs included. Pure Python (pre-commit's pygrep): no compiled
+  # binary that Windows Smart App Control could block. Same pattern as the
+  # entsoe-api-key rule of .gitleaks.toml: keep the two equal. gitleaks itself,
+  # with its default rules, is run on the files and the history before each push.
+  - repo: local
     hooks:
-      - id: gitleaks
+      - id: entsoe-api-key
+        name: Detect the ENTSO-E key
+        language: pygrep
+        entry: '(?i)(?:securitytoken|entsoe[_-]?api[_-]?key)["'']?\s*[:=]\s*["'']?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+        types: [text]

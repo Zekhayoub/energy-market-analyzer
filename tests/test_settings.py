@@ -50,6 +50,9 @@ def test_project_parameters_are_valid() -> None:
     assert len(config.regime.regime_names) in config.regime.bic_candidate_states
     assert config.anomaly.regime_names == config.regime.regime_names
     assert config.anomaly.contamination in config.anomaly.contamination_levels
+    assert config.prediction.regime_names == config.regime.regime_names
+    assert config.prediction.holdout_start == config.features.holdout_start
+    assert config.prediction.training_window_months in config.prediction.window_candidates_months
 
 
 def test_unknown_parameter_is_rejected() -> None:
@@ -111,5 +114,35 @@ def test_inconsistent_regime_section_is_rejected(change: dict[str, Any], message
 def test_inconsistent_anomaly_section_is_rejected(change: dict[str, Any], message: str) -> None:
     """Other regimes than the regime section, an unreported contamination or window, big trees."""
     parameters = _with_section("anomaly", change)
+
+    _assert_only_error(parameters, message)
+
+
+def _with_prediction_setting(group: str | None, change: dict[str, Any]) -> dict[str, Any]:
+    """The real parameters with `change` applied to the prediction section or one of its groups."""
+    parameters = _project_parameters()
+    prediction = parameters["prediction"]
+    if group is None:
+        return _with_section("prediction", change)
+    changed_group = {**prediction[group], **change}
+    return _with_section("prediction", {group: changed_group})
+
+
+@pytest.mark.parametrize(
+    ("group", "change", "message"),
+    [
+        (None, {"regime_names": ["low", "medium", "high"]}, "same regime_names"),
+        (None, {"development_epochs": ["2023-01-01", "2021-07-01"]}, "must be increasing"),
+        ("interval", {"calibration_days": 60}, "must list calibration_days \\(60\\)"),
+        ("alerts", {"confidence_probabilities": [0.7, 0.95]}, "must not exceed 0.90"),
+        ("model_a", {"tree_checkpoint_step": 300}, "must divide n_estimators \\(500\\)"),
+    ],
+)
+def test_inconsistent_prediction_section_is_rejected(
+    group: str | None, change: dict[str, Any], message: str
+) -> None:
+    """Other regimes, unordered epochs, an unreported calibration window, a confidence no
+    alert can reach, a tree curve without two points."""
+    parameters = _with_prediction_setting(group, change)
 
     _assert_only_error(parameters, message)

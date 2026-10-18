@@ -55,6 +55,12 @@ COLUMN_NAME_PATTERN = r"^[a-z][a-z0-9_]*$"
 MIN_ANOMALY_FEATURES = 2
 # scikit-learn's Isolation Forest accepts a contamination up to 0.5.
 MAX_CONTAMINATION = 0.5
+# The point prediction is a median: the interval bounds lie on each side of it,
+# the alert thresholds above it. The shortest day (spring clock change) has 23 hours.
+MEDIAN = 0.5
+SHORTEST_DAY_HOURS = 23
+# A test needs at least two points on the tree curve (rule 3 of run 5).
+MIN_TREE_CHECKPOINTS = 2
 
 
 # ==================================================
@@ -372,6 +378,174 @@ class AnomalyConfig(StrictModel):
         return self
 
 
+class XGBoostConfig(StrictModel):
+    """Fixed hyperparameters of the XGBoost models of one task (never tuned on tested months)."""
+
+    n_estimators: int = Field(..., ge=1)
+    learning_rate: float = Field(..., gt=0, le=1)
+    max_depth: int = Field(..., ge=1)
+    min_child_weight: float = Field(..., ge=0)
+    subsample: float = Field(..., gt=0, le=1)
+    colsample_bytree: float = Field(..., gt=0, le=1)
+    reg_lambda: float = Field(..., ge=0)
+
+
+class LightGBMConfig(StrictModel):
+    """Fixed hyperparameters of the LightGBM quantile models of one task."""
+
+    n_estimators: int = Field(..., ge=1)
+    learning_rate: float = Field(..., gt=0, le=1)
+    num_leaves: int = Field(..., ge=2)
+    min_child_samples: int = Field(..., ge=1)
+    subsample: float = Field(..., gt=0, le=1)
+    colsample_bytree: float = Field(..., gt=0, le=1)
+
+
+class ModelConfig(StrictModel):
+    """Settings of model A or model B."""
+
+    tree_checkpoint_step: int = Field(..., ge=1)
+    xgboost: XGBoostConfig
+    lightgbm: LightGBMConfig
+
+    @model_validator(mode="after")
+    def curve_has_points(self) -> ModelConfig:
+        """The tree curve ends at n_estimators and has at least two points (rule 3 of run 5)."""
+        n_estimators = self.xgboost.n_estimators
+        step = self.tree_checkpoint_step
+        if n_estimators % step != 0 or n_estimators // step < MIN_TREE_CHECKPOINTS:
+            raise ValueError(
+                f"tree_checkpoint_step ({step}) must divide n_estimators ({n_estimators}) "
+                f"at least {MIN_TREE_CHECKPOINTS} times"
+            )
+        return self
+
+
+class IntervalConfig(StrictModel):
+    """Quantiles and daily conformal calibration of the prediction interval."""
+
+    lower_quantile: float = Field(..., gt=0, lt=MEDIAN)
+    upper_quantile: float = Field(..., gt=MEDIAN, lt=1)
+    calibration_days: int = Field(..., ge=1)
+    calibration_candidates_days: list[int] = Field(..., min_length=1)
+    min_calibration_days: int = Field(..., ge=1)
+    min_width_share: float = Field(..., gt=0, le=1)
+    min_raw_width_eur_mwh: float = Field(..., gt=0)
+
+    @model_validator(mode="after")
+    def windows_agree(self) -> IntervalConfig:
+        """The report covers the configured window; a calibration needs its minimum history."""
+        candidates = self.calibration_candidates_days
+        if self.calibration_days not in candidates or len(set(candidates)) < len(candidates):
+            raise ValueError(
+                f"calibration_candidates_days must list calibration_days "
+                f"({self.calibration_days}) and each window once: {candidates}"
+            )
+        if self.min_calibration_days > min(candidates):
+            raise ValueError(
+                f"min_calibration_days ({self.min_calibration_days}) must not exceed the "
+                f"shortest calibration window ({min(candidates)})"
+            )
+        return self
+
+
+class AlertsConfig(StrictModel):
+    """Alert thresholds, confidence classes and daily ranks."""
+
+    high_quantile: float = Field(..., gt=MEDIAN, lt=1)
+    critical_quantile: float = Field(..., gt=MEDIAN, lt=1)
+    reference_window_months: int = Field(..., ge=1)
+    min_reference_hours: int = Field(..., ge=1)
+    confidence_probabilities: list[float] = Field(..., min_length=2, max_length=2)
+    cheapest_hours: int = Field(..., ge=1)
+    most_expensive_hours: int = Field(..., ge=1)
+
+    @model_validator(mode="after")
+    def levels_are_ordered(self) -> AlertsConfig:
+        """high below critical, medium below high confidence, ranks inside the shortest day."""
+        if self.high_quantile >= self.critical_quantile:
+            raise ValueError("high_quantile must be below critical_quantile")
+        medium, high = self.confidence_probabilities
+        if not MEDIAN < medium < high <= 1:
+            raise ValueError(
+                f"confidence_probabilities must be increasing, above {MEDIAN}: "
+                f"{self.confidence_probabilities}"
+            )
+        if self.cheapest_hours + self.most_expensive_hours > SHORTEST_DAY_HOURS:
+            raise ValueError(
+                f"cheapest_hours + most_expensive_hours must fit in a day of "
+                f"{SHORTEST_DAY_HOURS} hours"
+            )
+        return self
+
+
+class PredictionConfig(StrictModel):
+    """Validates the `prediction` section of parameters.yml."""
+
+    market_timezone: str
+    holdout_start: date
+    regime_names: list[str] = Field(..., min_length=MIN_REGIME_STATES)
+    min_train_months: int = Field(..., ge=1)
+    training_window_months: int | None = Field(..., ge=1)
+    window_candidates_months: list[int | None] = Field(..., min_length=1)
+    development_epochs: list[date]
+    min_regime_training_hours: int = Field(..., ge=1)
+    model_a: ModelConfig
+    model_b: ModelConfig
+    ridge_alpha: float = Field(..., gt=0)
+    random_state: int = Field(..., ge=0)
+    stability_seed: int = Field(..., ge=0)
+    significance: float = Field(..., gt=0, lt=MEDIAN)
+    min_dm_lag_days: int = Field(..., ge=1)
+    interval: IntervalConfig
+    alerts: AlertsConfig
+    worst_days: int = Field(..., ge=1)
+
+    @field_validator("market_timezone")
+    @classmethod
+    def timezone_exists(cls, value: str) -> str:
+        """Reject a time zone name that the tz database does not know."""
+        return _known_timezone(value)
+
+    @field_validator("window_candidates_months")
+    @classmethod
+    def candidates_are_windows(cls, value: list[int | None]) -> list[int | None]:
+        """Each candidate is null (every past row) or at least 1 month, and appears once."""
+        invalid_windows = [window for window in value if window is not None and window < 1]
+        if invalid_windows:
+            raise ValueError(f"window_candidates_months must be null or >= 1: {invalid_windows}")
+        if len(set(value)) < len(value):
+            raise ValueError(f"window_candidates_months lists a window twice: {value}")
+        return value
+
+    @model_validator(mode="after")
+    def settings_agree(self) -> PredictionConfig:
+        """Reported window, distinct seeds, ordered epochs, reachable confidence."""
+        if self.training_window_months not in self.window_candidates_months:
+            raise ValueError(
+                f"window_candidates_months must include training_window_months "
+                f"({self.training_window_months})"
+            )
+        if self.stability_seed == self.random_state:
+            raise ValueError("stability_seed must differ from random_state")
+        epochs = self.development_epochs
+        is_ordered = all(
+            earlier < later for earlier, later in zip(epochs, epochs[1:], strict=False)
+        )
+        if not is_ordered or (epochs and epochs[-1] >= self.holdout_start):
+            raise ValueError(
+                f"development_epochs must be increasing and before holdout_start: {epochs}"
+            )
+        # Beyond its interval nothing is known: a probability never exceeds 1 - lower_quantile.
+        highest_probability = 1 - self.interval.lower_quantile
+        if self.alerts.confidence_probabilities[-1] > highest_probability:
+            raise ValueError(
+                f"the high confidence probability must not exceed {highest_probability:.2f} "
+                f"(1 - lower_quantile), else no alert can reach it"
+            )
+        return self
+
+
 class ProjectConfig(StrictModel):
     """All parameter sections. Each pipeline adds its own field in its commit."""
 
@@ -379,6 +553,7 @@ class ProjectConfig(StrictModel):
     features: FeaturesConfig
     regime: RegimeConfig
     anomaly: AnomalyConfig
+    prediction: PredictionConfig
 
     @model_validator(mode="after")
     def sections_agree(self) -> ProjectConfig:
@@ -386,6 +561,7 @@ class ProjectConfig(StrictModel):
         _features_agree(self.ingestion, self.features)
         _regime_agrees(self.ingestion, self.features, self.regime)
         _anomaly_agrees(self.ingestion, self.regime, self.anomaly)
+        _prediction_agrees(self.ingestion, self.regime, self.prediction)
         return self
 
 
@@ -449,6 +625,38 @@ def _anomaly_agrees(
             f"regime and anomaly min_train_months ({months_before_first_score} months in all) "
             f"leave no scored month before holdout_start"
         )
+
+
+def _prediction_agrees(
+    ingestion: IngestionConfig, regime: RegimeConfig, prediction: PredictionConfig
+) -> None:
+    """Same time zone, holdout and regimes as the regime section; tested months before the
+    holdout, and every development epoch after the first tested month."""
+    if prediction.market_timezone != ingestion.market_timezone:
+        raise ValueError("prediction and ingestion must use the same market_timezone")
+    if prediction.holdout_start != regime.holdout_start:
+        raise ValueError(
+            f"prediction and regime must use the same holdout_start "
+            f"({prediction.holdout_start} vs {regime.holdout_start})"
+        )
+    if prediction.regime_names != regime.regime_names:
+        raise ValueError(
+            f"prediction and regime must use the same regime_names "
+            f"({prediction.regime_names} vs {regime.regime_names})"
+        )
+    months_before_holdout = _months_between(ingestion.start_date, prediction.holdout_start)
+    if prediction.min_train_months >= months_before_holdout:
+        raise ValueError(
+            f"prediction min_train_months ({prediction.min_train_months}) leaves no tested "
+            f"month before holdout_start"
+        )
+    epochs = prediction.development_epochs
+    if epochs:
+        months_before_epoch = _months_between(ingestion.start_date, epochs[0])
+        if months_before_epoch <= prediction.min_train_months:
+            raise ValueError(
+                f"development_epochs must start after the first tested month: {epochs[0]}"
+            )
 
 
 def _months_between(start: date, end: date) -> int:

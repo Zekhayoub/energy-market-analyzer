@@ -16,6 +16,9 @@ from energy_market_analyzer.pipelines.features.nodes import (
     DAY,
     PRICE_CHANGE,
     RESIDUAL_LOAD,
+    build_daily_market,
+    build_features_model_a,
+    build_features_model_b,
     market_days,
 )
 from energy_market_analyzer.pipelines.ingestion.nodes import (
@@ -35,11 +38,14 @@ from energy_market_analyzer.pipelines.ingestion.nodes import (
 )
 from energy_market_analyzer.pipelines.regime.nodes import (
     CLEAN_SPARK_SPREAD_MEAN,
+    FILTERED,
     LABEL_DTYPE,
     PRICE_CHANGE_STD,
     PRICE_MEAN,
     REGIME_FILTERED,
     REGIME_SMOOTHED,
+    SMOOTHED,
+    regime_columns,
 )
 
 GENERATION_COLUMNS = {
@@ -78,6 +84,15 @@ HOURLY_REGIMES = (
 )
 DAILY_SHAPE_SHARE = 0.15  # amplitude of the daily price shape, as a share of the mean price
 ANOMALY_FEATURES = [PRICE, PRICE_CHANGE, CLEAN_SPARK_SPREAD, RESIDUAL_LOAD, NET_IMPORT_TOTAL]
+# Prediction tests: ten months of market, tested from May, reserved period from September.
+PREDICTION_START = "2018-01-01"
+PREDICTION_END = "2018-10-31"
+PREDICTION_HOLDOUT = "2018-09-01"
+# Synthetic filtered regimes: blocks of days, the label at this probability, the
+# rest shared by the other regimes; no regime during the first days, as in the data.
+REGIME_BLOCK_DAYS = 9
+REGIME_PROBABILITY = 0.8
+DAYS_WITHOUT_REGIME = 20
 
 
 def make_ingestion_params(**overrides: Any) -> dict[str, Any]:
@@ -386,3 +401,118 @@ def make_hourly_market(
     labels = pd.array(day_states, dtype=LABEL_DTYPE)
     regimes = pd.DataFrame({REGIME_FILTERED: labels, REGIME_SMOOTHED: labels}, index=days)
     return with_change[ANOMALY_FEATURES], regimes
+
+
+def make_prediction_params(**overrides: Any) -> dict[str, Any]:
+    """Prediction parameters for tests: few small trees, short windows, to stay fast.
+
+    Args:
+        **overrides: Keys to replace, e.g. training_window_months=2.
+
+    Returns:
+        A dict shaped like the `prediction` section of parameters.yml.
+    """
+    xgboost = {
+        "n_estimators": 10,
+        "learning_rate": 0.3,
+        "max_depth": 3,
+        "min_child_weight": 1,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "reg_lambda": 1.0,
+    }
+    lightgbm = {
+        "n_estimators": 10,
+        "learning_rate": 0.1,
+        "num_leaves": 7,
+        "min_child_samples": 10,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+    }
+    model = {"tree_checkpoint_step": 5, "xgboost": xgboost, "lightgbm": lightgbm}
+    base_params = {
+        "market_timezone": MARKET_TIMEZONE,
+        "holdout_start": PREDICTION_HOLDOUT,
+        "regime_names": REGIME_NAMES,
+        "min_train_months": 4,
+        "training_window_months": None,
+        "window_candidates_months": [None, 2],
+        "development_epochs": ["2018-07-01"],
+        "min_regime_training_hours": 240,
+        "model_a": model,
+        "model_b": model,
+        "ridge_alpha": 1.0,
+        "random_state": 42,
+        "stability_seed": 123,
+        "significance": 0.05,
+        "min_dm_lag_days": 7,
+        "interval": {
+            "lower_quantile": 0.1,
+            "upper_quantile": 0.9,
+            "calibration_days": 14,
+            "calibration_candidates_days": [7, 14],
+            "min_calibration_days": 7,
+            "min_width_share": 0.2,
+            "min_raw_width_eur_mwh": 1.0,
+        },
+        "alerts": {
+            "high_quantile": 0.8,
+            "critical_quantile": 0.95,
+            "reference_window_months": 2,
+            "min_reference_hours": 48,
+            "confidence_probabilities": [0.7, 0.9],
+            "cheapest_hours": 8,
+            "most_expensive_hours": 4,
+        },
+        "worst_days": 3,
+    }
+    return {**base_params, **overrides}
+
+
+def make_filtered_regimes(days: pd.DatetimeIndex) -> pd.DataFrame:
+    """Daily regimes table with a known filtered regime: blocks cycling calm, volatile, crisis.
+
+    Args:
+        days: Calendar days.
+
+    Returns:
+        regime_filtered (Int8) and one probability per regime: REGIME_PROBABILITY on
+        the label, the rest shared; missing on the first DAYS_WITHOUT_REGIME days.
+        The smoothed columns repeat the filtered ones (tests change them to check
+        they are never read).
+    """
+    filtered = _known_regimes(days)
+    smoothed_columns = regime_columns(SMOOTHED, REGIME_NAMES)
+    smoothed = filtered.set_axis(smoothed_columns, axis=1)
+    return pd.concat([filtered, smoothed], axis=1)
+
+
+def _known_regimes(days: pd.DatetimeIndex) -> pd.DataFrame:
+    """Filtered regime columns of `make_filtered_regimes`."""
+    label_column, *probability_columns = regime_columns(FILTERED, REGIME_NAMES)
+    blocks = np.arange(len(days)) // REGIME_BLOCK_DAYS
+    labels = blocks % len(REGIME_NAMES)
+    other_share = (1 - REGIME_PROBABILITY) / (len(REGIME_NAMES) - 1)
+    probabilities = np.full((len(days), len(REGIME_NAMES)), other_share)
+    probabilities[np.arange(len(days)), labels] = REGIME_PROBABILITY
+    probabilities[:DAYS_WITHOUT_REGIME] = np.nan
+    known_labels = np.where(np.arange(len(days)) < DAYS_WITHOUT_REGIME, np.nan, labels)
+    table = pd.DataFrame(probabilities, index=days.rename(DAY), columns=probability_columns)
+    table.insert(0, label_column, pd.array(known_labels, dtype=LABEL_DTYPE))
+    return table
+
+
+def make_prediction_market() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Feature tables A and B, built by the real feature nodes, and a filtered regimes table.
+
+    Returns:
+        features_model_a, features_model_b and regimes, from PREDICTION_START to
+        PREDICTION_END.
+    """
+    master = make_master(PREDICTION_START, PREDICTION_END)
+    params = make_features_params(holdout_start=PREDICTION_HOLDOUT)
+    daily_market = build_daily_market(master, params)
+    features_model_a = build_features_model_a(master, daily_market, params)
+    features_model_b = build_features_model_b(daily_market, params)
+    days = pd.date_range(PREDICTION_START, PREDICTION_END, freq="D")
+    return features_model_a, features_model_b, make_filtered_regimes(days)

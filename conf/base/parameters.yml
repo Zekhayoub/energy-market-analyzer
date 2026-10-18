@@ -209,7 +209,9 @@ anomaly:
   # Training hours of each refit: every past hour (null) or those of the last
   # training_window_months months only. Rule of run 4 (decisions.md, section
   # 12): the candidates are compared on the development period, and the window
-  # with the lower mean calibration error is kept.
+  # with the lower mean calibration error is kept. Run 4: 0.055 with 24 months,
+  # 0.098 with every past hour (the post-crisis "volatile" market was compared
+  # with 2019-2020).
   training_window_months: 24
   window_candidates_months: [null, 24]
 
@@ -234,3 +236,117 @@ anomaly:
 
   # Strongest events listed in the report, per period.
   top_events: 10
+
+
+# --- Prediction ---
+# Model A (hourly price of J+1) and model B (daily mean price of J+2 to J+4),
+# decided at 11:00 on J (decisions D25 to D30). On the first day of each month,
+# every model is refitted on the rows whose predicted day is before that day,
+# then predicts the month. Choices (variant, trees, window, interval calibration)
+# are read on the development period only, by the rules of run 5 (decisions.md).
+prediction:
+  market_timezone: ${globals:market_timezone}
+  holdout_start: ${globals:holdout_start}
+  # Same names, in the same order, as the regime section (label 0 = calm).
+  regime_names: ${regime.regime_names}
+
+  # Months of data before the first tested month: with data from January 2018,
+  # the first tested month is January 2020 (69 development months).
+  min_train_months: 24
+
+  # Training rows of each refit: every past row (null) or those of the last
+  # training_window_months months. The global model of A is also refitted on
+  # the other candidates (development months only): rule 4 of run 5 decides.
+  training_window_months: null
+  window_candidates_months: [null, 24]
+
+  # First day of each development epoch after the first: the selection rule and
+  # the value of the regime columns are also reported epoch by epoch.
+  development_epochs: ["2021-07-01", "2023-01-01"]
+
+  # A regime of J with fewer known training hours (180 days: two seasons) is
+  # predicted by the global model in the per-regime and hybrid variants.
+  min_regime_training_hours: 4320
+
+  # Fixed in advance, never tuned on the tested months (no early stopping).
+  # Rule 3 of run 5 reads the development MAE every tree_checkpoint_step trees.
+  model_a:
+    tree_checkpoint_step: 100
+    xgboost:
+      n_estimators: 500
+      learning_rate: 0.1
+      max_depth: 6
+      min_child_weight: 5
+      subsample: 0.8
+      colsample_bytree: 0.8
+      reg_lambda: 1.0
+    lightgbm:
+      n_estimators: 400
+      learning_rate: 0.05
+      num_leaves: 31
+      min_child_samples: 50
+      subsample: 0.8
+      colsample_bytree: 0.8
+  # About 8 times fewer rows than model A (one per day and horizon), and a daily
+  # target: shallower trees and larger leaves, else the model learns the noise.
+  model_b:
+    tree_checkpoint_step: 50
+    xgboost:
+      n_estimators: 300
+      learning_rate: 0.05
+      max_depth: 3
+      min_child_weight: 20
+      subsample: 0.8
+      colsample_bytree: 0.8
+      reg_lambda: 1.0
+    lightgbm:
+      n_estimators: 300
+      learning_rate: 0.05
+      num_leaves: 7
+      min_child_samples: 30
+      subsample: 0.8
+      colsample_bytree: 0.8
+
+  # Linear baseline: ridge on the standardized features, calendar one-hot encoded.
+  ridge_alpha: 1.0
+
+  # Seed of every model. The second seed refits the global model of A on the
+  # development months: it measures the training noise, it is never chosen.
+  random_state: 42
+  stability_seed: 123
+
+  # Selection rule: the simplest variant not significantly worse than the best
+  # (Diebold-Mariano test, two-sided), lag of the long-run variance at least a week.
+  significance: 0.05
+  min_dm_lag_days: 7
+
+  # 80 % interval from LightGBM quantile models, calibrated each day with the
+  # out-of-sample errors of the last calibration_days days known at 11:00 J
+  # (split-conformal, scaled by the width). No calibration before
+  # min_calibration_days days of errors; a calibration never shrinks an interval
+  # below min_width_share of its raw width.
+  interval:
+    lower_quantile: 0.1
+    upper_quantile: 0.9
+    calibration_days: 90
+    calibration_candidates_days: [30, 90, 180]
+    min_calibration_days: 30
+    min_width_share: 0.2
+    min_raw_width_eur_mwh: 1.0
+
+  # Alerts on the hours of J+1 (business choices): high above the 80 % quantile,
+  # critical above the 95 % quantile of the realized prices of the days of the
+  # regime of J over the previous 24 months (the closest regime when too few
+  # hours). Confidence: probability that the hour really is at its level
+  # (medium from 0.7, high from 0.9). Cheapest and most expensive hours of the day.
+  alerts:
+    high_quantile: 0.8
+    critical_quantile: 0.95
+    reference_window_months: 24
+    min_reference_hours: 720
+    confidence_probabilities: [0.7, 0.9]
+    cheapest_hours: 8
+    most_expensive_hours: 4
+
+  # Worst days listed in the residuals of the report, per period.
+  worst_days: 10

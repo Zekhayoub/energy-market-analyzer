@@ -89,6 +89,24 @@ anomaly_events:
   type: pandas.ParquetDataset
   filepath: data/07_model_output/anomaly_events.parquet
 
+# Model A: one row per predicted hour (UTC), from January 2020. Every model's
+# prediction (each refitted monthly on the past), the selected variant and its
+# raw and calibrated 80 % interval.
+predictions_model_a:
+  type: pandas.ParquetDataset
+  filepath: data/07_model_output/predictions_model_a.parquet
+
+# Model B: one row per (decision_day, horizon_days), same columns for the daily mean price.
+predictions_model_b:
+  type: pandas.ParquetDataset
+  filepath: data/07_model_output/predictions_model_b.parquet
+
+# Alerts: one row per predicted hour of model A. Level against the regime's
+# thresholds, its probability and confidence, rank of the hour in its day.
+alerts:
+  type: pandas.ParquetDataset
+  filepath: data/07_model_output/alerts.parquet
+
 
 # === 08_reporting ===
 
@@ -107,3 +125,7 @@ regime_report:
 anomaly_report:
   type: json.JSONDataset
   filepath: data/08_reporting/anomaly_report.json
+
+prediction_report:
+  type: json.JSONDataset
+  filepath: data/08_reporting/prediction_report.json
