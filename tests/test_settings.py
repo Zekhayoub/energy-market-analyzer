@@ -48,6 +48,8 @@ def test_project_parameters_are_valid() -> None:
     assert config.ingestion.start_date < config.features.holdout_start
     assert config.regime.holdout_start == config.features.holdout_start
     assert len(config.regime.regime_names) in config.regime.bic_candidate_states
+    assert config.anomaly.regime_names == config.regime.regime_names
+    assert config.anomaly.contamination in config.anomaly.contamination_levels
 
 
 def test_unknown_parameter_is_rejected() -> None:
@@ -93,5 +95,21 @@ def test_inconsistent_features_section_is_rejected(change: dict[str, Any], messa
 def test_inconsistent_regime_section_is_rejected(change: dict[str, Any], message: str) -> None:
     """A number of states without a BIC, a different reserved period, overlapping seeds."""
     parameters = _with_section("regime", change)
+
+    _assert_only_error(parameters, message)
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"regime_names": ["low", "medium", "high"]}, "same regime_names"),
+        ({"contamination": 0.03}, "contamination_levels must include contamination"),
+        ({"max_samples": 1000}, "must not exceed min_training_hours"),
+        ({"training_window_months": 36}, "must include training_window_months"),
+    ],
+)
+def test_inconsistent_anomaly_section_is_rejected(change: dict[str, Any], message: str) -> None:
+    """Other regimes than the regime section, an unreported contamination or window, big trees."""
+    parameters = _with_section("anomaly", change)
 
     _assert_only_error(parameters, message)

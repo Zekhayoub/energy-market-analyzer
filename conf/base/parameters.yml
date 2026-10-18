@@ -171,3 +171,66 @@ regime:
   # check refits the development model from the other seeds.
   random_state: 42
   stability_seeds: [123, 456]
+
+
+# --- Anomaly ---
+# Isolation Forest per filtered regime, refitted on the first day of each month
+# on the previous hours of that regime only (decisions D21 to D24). An hour is
+# anomalous when it is unusual for its regime: 200 EUR/MWh is ordinary in a
+# crisis and rare when the market is calm. Retrospective analysis (model C):
+# never an input of models A and B.
+anomaly:
+  market_timezone: ${globals:market_timezone}
+  holdout_start: ${globals:holdout_start}
+  # Same names, in the same order, as the regime section (label 0 = calm).
+  regime_names: ${regime.regime_names}
+
+  # Table C columns the Isolation Forests see. No calendar column (hour 23 would
+  # be far from hour 0; the residual load gives the context of the hour), no fuel
+  # level (daily steps with a trend: they enter through the spread), no 24-hour
+  # volatility (after one spike it stays high, and flagged, for a whole day).
+  # The order is the order of preference when two drivers are equally rare.
+  features:
+    - price_eur_mwh
+    - price_change_1h
+    - clean_spark_spread
+    - residual_load_mw
+    - net_import_total
+
+  # Months of filtered regimes before the first scored month (one full seasonal
+  # cycle): the first filtered regime is on 1 January 2019, the first scored
+  # month is January 2020.
+  min_train_months: 12
+
+  # A regime with fewer training hours (30 days) is scored by the closest regime
+  # in volatility order that has enough, the more volatile one on a tie.
+  min_training_hours: 720
+
+  # Training hours of each refit: every past hour (null) or those of the last
+  # training_window_months months only. Rule of run 4 (decisions.md, section
+  # 12): the candidates are compared on the development period, and the window
+  # with the lower mean calibration error is kept.
+  training_window_months: 24
+  window_candidates_months: [null, 24]
+
+  # Business choice: share of each regime's training hours above the threshold
+  # (5 % = about 440 hours a year for the procurement team). The report gives
+  # the realized share and the events per week at each level of the list.
+  contamination: 0.05
+  contamination_levels: [0.01, 0.02, 0.05, 0.10]
+
+  # Isolation Forest of Liu et al. (2008): trees, and hours drawn per tree, as
+  # in the paper. The stability check refits the development period with the
+  # second seed; the seed is never chosen from the results.
+  n_estimators: 200
+  max_samples: 256
+  random_state: 42
+  stability_seed: 123
+
+  # Two anomalous hours separated by at most this many normal hours belong to
+  # the same event (a price shock lasts 3 to 6 hours). An unscored hour ends an
+  # event, and so does holdout_start.
+  event_max_gap_hours: 4
+
+  # Strongest events listed in the report, per period.
+  top_events: 10

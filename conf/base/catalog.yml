@@ -75,6 +75,21 @@ regimes:
   filepath: data/04_feature/regimes.parquet
 
 
+# === 07_model_output ===
+
+# Anomalies: one row per hour (UTC). Score of the Isolation Forest of the hour's
+# filtered regime, refitted each month on the past; flag, driver and event.
+# Retrospective analysis (model C) only, never a prediction input.
+anomalies:
+  type: pandas.ParquetDataset
+  filepath: data/07_model_output/anomalies.parquet
+
+# One row per anomaly event: anomalous hours close in time, peak hour and driver.
+anomaly_events:
+  type: pandas.ParquetDataset
+  filepath: data/07_model_output/anomaly_events.parquet
+
+
 # === 08_reporting ===
 
 data_quality_report:
@@ -88,3 +103,7 @@ features_report:
 regime_report:
   type: json.JSONDataset
   filepath: data/08_reporting/regime_report.json
+
+anomaly_report:
+  type: json.JSONDataset
+  filepath: data/08_reporting/anomaly_report.json

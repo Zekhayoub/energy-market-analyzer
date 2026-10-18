@@ -11,11 +11,18 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from energy_market_analyzer.pipelines.features.nodes import DAY
+from energy_market_analyzer.pipelines.features.nodes import (
+    CLEAN_SPARK_SPREAD,
+    DAY,
+    PRICE_CHANGE,
+    RESIDUAL_LOAD,
+    market_days,
+)
 from energy_market_analyzer.pipelines.ingestion.nodes import (
     EUA,
     LOAD,
     LOAD_FORECAST,
+    NET_IMPORT_TOTAL,
     ONE_DAY,
     PRICE,
     TIMESTAMP,
@@ -28,8 +35,11 @@ from energy_market_analyzer.pipelines.ingestion.nodes import (
 )
 from energy_market_analyzer.pipelines.regime.nodes import (
     CLEAN_SPARK_SPREAD_MEAN,
+    LABEL_DTYPE,
     PRICE_CHANGE_STD,
     PRICE_MEAN,
+    REGIME_FILTERED,
+    REGIME_SMOOTHED,
 )
 
 GENERATION_COLUMNS = {
@@ -58,6 +68,16 @@ SYNTHETIC_REGIMES = (
         CLEAN_SPARK_SPREAD_MEAN: (70.0, 30.0),
     },
 )
+MARKET_TIMEZONE = "Europe/Brussels"
+# Hourly market of three synthetic regimes, in order of increasing volatility (EUR/MWh):
+# mean price, hourly noise, fuel cost. The price follows a daily shape around its mean.
+HOURLY_REGIMES = (
+    {"price": 45.0, "noise": 5.0, "fuel": 30.0},
+    {"price": 85.0, "noise": 12.0, "fuel": 60.0},
+    {"price": 230.0, "noise": 35.0, "fuel": 180.0},
+)
+DAILY_SHAPE_SHARE = 0.15  # amplitude of the daily price shape, as a share of the mean price
+ANOMALY_FEATURES = [PRICE, PRICE_CHANGE, CLEAN_SPARK_SPREAD, RESIDUAL_LOAD, NET_IMPORT_TOTAL]
 
 
 def make_ingestion_params(**overrides: Any) -> dict[str, Any]:
@@ -292,3 +312,77 @@ def make_regime_observations(
         column: _draw_observation(column, true_states, rng) for column in SYNTHETIC_REGIMES[0]
     }
     return pd.DataFrame(observations, index=days), true_states
+
+
+def make_anomaly_params(**overrides: Any) -> dict[str, Any]:
+    """Anomaly parameters for tests: small forests and short training, to stay fast.
+
+    Args:
+        **overrides: Keys to replace, e.g. min_training_hours=10**5.
+
+    Returns:
+        A dict shaped like the `anomaly` section of parameters.yml.
+    """
+    base_params = {
+        "market_timezone": MARKET_TIMEZONE,
+        "holdout_start": "2019-07-01",
+        "regime_names": REGIME_NAMES,
+        "features": list(ANOMALY_FEATURES),
+        "min_train_months": 2,
+        "min_training_hours": 240,
+        "training_window_months": None,
+        "window_candidates_months": [None, 1],
+        "contamination": 0.05,
+        "contamination_levels": [0.02, 0.05, 0.1],
+        "n_estimators": 50,
+        "max_samples": 128,
+        "random_state": 0,
+        "stability_seed": 1,
+        "event_max_gap_hours": 4,
+        "top_events": 5,
+    }
+    return {**base_params, **overrides}
+
+
+def make_hourly_market(
+    day_states: list[int], start_day: str = "2019-01-01"
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Hourly table C columns of the anomaly features and a regimes table, from known regimes.
+
+    Args:
+        day_states: Regime of each calendar day (0 = calm, 1 = volatile, 2 = crisis).
+        start_day: First calendar day in Brussels.
+
+    Returns:
+        Table C (UTC hourly index, the columns of ANOMALY_FEATURES) and the daily
+        regimes table, whose filtered and smoothed regimes are the true ones.
+    """
+    rng = np.random.default_rng(RANDOM_SEED)
+    days = pd.date_range(start_day, periods=len(day_states), freq="D", name=DAY)
+    first_hour = pd.Timestamp(start_day, tz=MARKET_TIMEZONE)
+    end_hour = pd.Timestamp(days[-1] + ONE_DAY, tz=MARKET_TIMEZONE)
+    local_hours = pd.date_range(first_hour, end_hour, freq="h", inclusive="left")
+    hours = local_hours.tz_convert("UTC").rename(TIMESTAMP)
+    states = pd.Series(day_states, index=days).reindex(market_days(hours, MARKET_TIMEZONE))
+    regime_values = {
+        name: np.array([regime[name] for regime in HOURLY_REGIMES])[states.to_numpy()]
+        for name in HOURLY_REGIMES[0]
+    }
+    daily_shape = np.sin((local_hours.hour.to_numpy() - 6) / 24 * 2 * np.pi)
+    noise = rng.normal(0, regime_values["noise"])
+    price = regime_values["price"] * (1 + DAILY_SHAPE_SHARE * daily_shape) + noise
+    fuel = regime_values["fuel"] + rng.normal(0, 1, len(hours))
+    residual_load = 8000 + 1500 * daily_shape + rng.normal(0, 400, len(hours))
+    table_c = pd.DataFrame(
+        {
+            PRICE: price,
+            CLEAN_SPARK_SPREAD: price - fuel,
+            RESIDUAL_LOAD: residual_load,
+            NET_IMPORT_TOTAL: rng.normal(500, 800, len(hours)),
+        },
+        index=hours,
+    )
+    with_change = table_c.assign(**{PRICE_CHANGE: table_c[PRICE].diff()})
+    labels = pd.array(day_states, dtype=LABEL_DTYPE)
+    regimes = pd.DataFrame({REGIME_FILTERED: labels, REGIME_SMOOTHED: labels}, index=days)
+    return with_change[ANOMALY_FEATURES], regimes
