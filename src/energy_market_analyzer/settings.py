@@ -65,6 +65,11 @@ MIN_TREE_CHECKPOINTS = 2
 # average, no hour could take more energy and nothing could move.
 MAX_FLEXIBILITY_WINDOW_HOURS = SHORTEST_DAY_HOURS - 1
 MIN_FLEXIBLE_POWER_FACTOR = 1.0
+# Interpretability: shap draws at most 100 background rows (its masker's default); the day of
+# the method check exists in every month.
+MAX_BACKGROUND_ROWS = 100
+MIN_BACKGROUND_ROWS = 10
+LAST_DAY_IN_EVERY_MONTH = 28
 
 
 # ==================================================
@@ -602,6 +607,41 @@ class BacktestConfig(StrictModel):
         return self
 
 
+class DriversConfig(StrictModel):
+    """Level of the drivers the morning report shows: features, or families of features."""
+
+    day: Literal["feature", "family"]
+    hour: Literal["feature", "family"]
+
+
+class MorningReportConfig(StrictModel):
+    """Decision day and content of the morning report."""
+
+    decision_day: date | None
+    track_record_days: int = Field(..., ge=1)
+    anomaly_lookback_days: int = Field(..., ge=1)
+    drivers: DriversConfig
+
+
+class InterpretabilityConfig(StrictModel):
+    """Validates the `interpretability` section of parameters.yml (decisions D33, D34)."""
+
+    market_timezone: str
+    holdout_start: date
+    regime_names: list[str] = Field(..., min_length=MIN_REGIME_STATES)
+    development_epochs: list[date]
+    top_drivers: int = Field(..., ge=1)
+    method_check_day_of_month: int = Field(..., ge=1, le=LAST_DAY_IN_EVERY_MONTH)
+    method_check_background_rows: int = Field(..., ge=MIN_BACKGROUND_ROWS, le=MAX_BACKGROUND_ROWS)
+    morning_report: MorningReportConfig
+
+    @field_validator("market_timezone")
+    @classmethod
+    def timezone_exists(cls, value: str) -> str:
+        """Reject a time zone name that the tz database does not know."""
+        return _known_timezone(value)
+
+
 class ProjectConfig(StrictModel):
     """All parameter sections. Each pipeline adds its own field in its commit."""
 
@@ -611,6 +651,7 @@ class ProjectConfig(StrictModel):
     anomaly: AnomalyConfig
     prediction: PredictionConfig
     backtest: BacktestConfig
+    interpretability: InterpretabilityConfig
 
     @model_validator(mode="after")
     def sections_agree(self) -> ProjectConfig:
@@ -620,6 +661,7 @@ class ProjectConfig(StrictModel):
         _anomaly_agrees(self.ingestion, self.regime, self.anomaly)
         _prediction_agrees(self.ingestion, self.regime, self.prediction)
         _backtest_agrees(self.prediction, self.backtest)
+        _interpretability_agrees(self.ingestion, self.prediction, self.interpretability)
         return self
 
 
@@ -735,6 +777,31 @@ def _backtest_agrees(prediction: PredictionConfig, backtest: BacktestConfig) -> 
     different = [name for name, (ours, theirs) in shared.items() if ours != theirs]
     if different:
         raise ValueError(f"backtest and prediction must use the same {different}")
+
+
+def _interpretability_agrees(
+    ingestion: IngestionConfig,
+    prediction: PredictionConfig,
+    interpretability: InterpretabilityConfig,
+) -> None:
+    """The explanations refit the prediction models: same time zone, reserved period, regimes
+    and epochs; the morning report's decision day lies inside the delivery period."""
+    shared = {
+        "market_timezone": (interpretability.market_timezone, prediction.market_timezone),
+        "holdout_start": (interpretability.holdout_start, prediction.holdout_start),
+        "regime_names": (interpretability.regime_names, prediction.regime_names),
+        "development_epochs": (interpretability.development_epochs, prediction.development_epochs),
+    }
+    different = [name for name, (ours, theirs) in shared.items() if ours != theirs]
+    if different:
+        raise ValueError(f"interpretability and prediction must use the same {different}")
+    decision_day = interpretability.morning_report.decision_day
+    is_inside = decision_day is None or ingestion.start_date <= decision_day < ingestion.end_date
+    if not is_inside:
+        raise ValueError(
+            f"morning_report.decision_day ({decision_day}) must fall from start_date to the day "
+            f"before end_date ({ingestion.end_date})"
+        )
 
 
 def _months_between(start: date, end: date) -> int:

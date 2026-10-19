@@ -3,7 +3,8 @@
 # ==================================================
 # Tables are stored in Parquet: it keeps the dtypes and the
 # UTC time zone that CSV loses on reload (decision D10).
-# Reports are JSON. Each pipeline adds its datasets.
+# Reports are JSON (the morning report also in Markdown).
+# Each pipeline adds its datasets.
 # The ENTSO-E key is not declared here: the hook in
 # settings.py adds it as `entsoe_api_key`.
 # ==================================================
@@ -113,6 +114,17 @@ backtest_daily:
   type: pandas.ParquetDataset
   filepath: data/07_model_output/backtest_daily.parquet
 
+# SHAP values of every published prediction of model A: one row per predicted hour (UTC).
+# Mean price of J (anchor) + base_value + the shap_<feature> columns = pred_selected.
+shap_model_a:
+  type: pandas.ParquetDataset
+  filepath: data/07_model_output/shap_model_a.parquet
+
+# SHAP values of every published prediction of model B: index (decision_day, horizon_days).
+shap_model_b:
+  type: pandas.ParquetDataset
+  filepath: data/07_model_output/shap_model_b.parquet
+
 
 # === 08_reporting ===
 
@@ -139,3 +151,22 @@ prediction_report:
 backtest_report:
   type: json.JSONDataset
   filepath: data/08_reporting/backtest_report.json
+
+shap_report:
+  type: json.JSONDataset
+  filepath: data/08_reporting/shap_report.json
+
+# Morning report of one decision day: JSON content and its Markdown view (UTF-8 on every
+# system: Windows would otherwise write cp1252).
+morning_report:
+  type: json.JSONDataset
+  filepath: data/08_reporting/morning_report.json
+
+morning_report_markdown:
+  type: text.TextDataset
+  filepath: data/08_reporting/morning_report.md
+  fs_args:
+    open_args_load:
+      encoding: utf-8
+    open_args_save:
+      encoding: utf-8

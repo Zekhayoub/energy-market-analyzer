@@ -1,4 +1,6 @@
-# Secret scan used by the gitleaks pre-commit hook.
+# Secret scan run with gitleaks on the files and the history before each push.
+# The entsoe-api-key hook of .pre-commit-config.yaml (pure Python) uses the same
+# pattern on every commit: keep the two equal.
 # Default gitleaks rules + one rule for the ENTSO-E Transparency Platform key.
 
 title = "Energy Market Analyzer secret scan"

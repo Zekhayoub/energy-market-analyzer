@@ -11,6 +11,16 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from energy_market_analyzer.pipelines.anomaly.nodes import (
+    ANOMALY_MODEL,
+    ANOMALY_SCORE,
+    ANOMALY_THRESHOLD,
+    EVENT_ID,
+    IS_ANOMALY,
+    PRICE_PERCENTILE,
+    TOP_DRIVER,
+    TOP_DRIVER_PERCENTILE,
+)
 from energy_market_analyzer.pipelines.features.nodes import (
     CLEAN_SPARK_SPREAD,
     DAY,
@@ -111,6 +121,12 @@ BACKTEST_HOLDOUT = "2019-10-01"
 BACKTEST_PRICE = 60.0
 BACKTEST_SELECTED_NOISE = 8.0
 BACKTEST_NAIVE_NOISE = 15.0
+# Interpretability tests: the prediction market above; a decision day of the reserved period
+# (a Monday) and the anomaly scores of the synthetic anomalies table.
+INTERPRETABILITY_DECISION_DAY = "2018-10-15"
+NORMAL_SCORE = 0.40
+ANOMALOUS_SCORE = 0.75
+ANOMALY_SCORE_THRESHOLD = 0.60
 
 
 def make_ingestion_params(**overrides: Any) -> dict[str, Any]:
@@ -607,3 +623,59 @@ def make_backtest_market() -> tuple[pd.DataFrame, pd.DataFrame]:
         index=hours,
     )
     return predictions, make_alerts(predictions, make_backtest_params())
+
+
+def make_interpretability_params(**overrides: Any) -> dict[str, Any]:
+    """Interpretability parameters for the prediction market of the tests.
+
+    Args:
+        **overrides: Keys to replace, e.g. top_drivers=2.
+
+    Returns:
+        A dict shaped like the `interpretability` section of parameters.yml.
+    """
+    base_params = {
+        "market_timezone": MARKET_TIMEZONE,
+        "holdout_start": PREDICTION_HOLDOUT,
+        "regime_names": REGIME_NAMES,
+        "development_epochs": ["2018-07-01"],
+        "top_drivers": 3,
+        "method_check_day_of_month": 15,
+        "method_check_background_rows": 50,
+        "morning_report": {
+            "decision_day": None,
+            "track_record_days": 30,
+            "anomaly_lookback_days": 7,
+            "drivers": {"day": "feature", "hour": "feature"},
+        },
+    }
+    return {**base_params, **overrides}
+
+
+def make_anomalies(hours: pd.DatetimeIndex, anomalous_hours: list[pd.Timestamp]) -> pd.DataFrame:
+    """Anomalies table shaped like the anomaly pipeline's, every hour scored by the calm model.
+
+    Args:
+        hours: Continuous hourly UTC grid.
+        anomalous_hours: Hours flagged as anomalous (the others are normal).
+
+    Returns:
+        One row per hour with the columns of the `anomalies` table; the price is the driver
+        of the anomalous hours.
+    """
+    is_anomalous = hours.isin(pd.DatetimeIndex(anomalous_hours))
+    labels = pd.array(np.zeros(len(hours), dtype=int), dtype=LABEL_DTYPE)
+    return pd.DataFrame(
+        {
+            REGIME_FILTERED: labels,
+            ANOMALY_MODEL: labels,
+            ANOMALY_SCORE: np.where(is_anomalous, ANOMALOUS_SCORE, NORMAL_SCORE),
+            ANOMALY_THRESHOLD: ANOMALY_SCORE_THRESHOLD,
+            IS_ANOMALY: pd.array(is_anomalous, dtype="boolean"),
+            PRICE_PERCENTILE: np.where(is_anomalous, 99.5, 50.0),
+            TOP_DRIVER: pd.array(np.where(is_anomalous, PRICE, None), dtype="string"),
+            TOP_DRIVER_PERCENTILE: np.where(is_anomalous, 99.5, np.nan),
+            EVENT_ID: pd.array([pd.NA] * len(hours), dtype="Int32"),
+        },
+        index=hours,
+    )

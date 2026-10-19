@@ -390,3 +390,41 @@ backtest:
 
   # Days where the selected schedule loses the most, listed in the report, per period.
   worst_days: 10
+
+
+# --- Interpretability ---
+# Exact SHAP values of the published predictions (selected variant of models A and B,
+# refitted each month exactly as in the prediction pipeline) and the morning report of one
+# decision day (decisions D33 and D34). SHAP describes the model, not the market: a driver
+# is associated with a prediction, it is not its cause.
+interpretability:
+  market_timezone: ${globals:market_timezone}
+  holdout_start: ${globals:holdout_start}
+  regime_names: ${regime.regime_names}
+  # The report gives the explanations of each development epoch.
+  development_epochs: ${prediction.development_epochs}
+
+  # Drivers shown for the level of a day and for each hour; the others are summed in "other".
+  top_drivers: 3
+
+  # Robustness check of the attribution method (development months only): interventional
+  # SHAP on the rows of this day of each month, against this many training rows of the
+  # month drawn with the prediction seed (shap uses 100 at most).
+  method_check_day_of_month: 15
+  method_check_background_rows: 100
+
+  morning_report:
+    # Decision day J (11:00 Brussels). null = the last day whose J+1 is fully predicted and
+    # whose model B covers every horizon. Replay another morning with
+    # --params="interpretability.morning_report.decision_day=2022-08-28".
+    decision_day: null
+    # Delivered days up to J whose backtest savings are shown.
+    track_record_days: 30
+    # Anomalous hours of J-1 are grouped into events with the hours of these previous days.
+    anomaly_lookback_days: 7
+    # feature or family: level of the drivers shown, for the level of a day and for each
+    # hour. Rule 3 of run 7 (stability of the first driver across the two seeds, on the
+    # development period) decides; switched here after the run if it asks for families.
+    drivers:
+      day: feature
+      hour: feature

@@ -56,6 +56,9 @@ def test_project_parameters_are_valid() -> None:
     assert config.backtest.holdout_start == config.features.holdout_start
     assert config.backtest.cheapest_hours == config.prediction.alerts.cheapest_hours
     assert config.backtest.shift_cost_eur_mwh in config.backtest.shift_cost_levels_eur_mwh
+    assert config.interpretability.regime_names == config.prediction.regime_names
+    assert config.interpretability.development_epochs == config.prediction.development_epochs
+    assert config.interpretability.morning_report.decision_day is None
 
 
 def test_unknown_parameter_is_rejected() -> None:
@@ -165,4 +168,36 @@ def test_inconsistent_backtest_section_is_rejected(change: dict[str, Any], messa
     maximum power at which nothing can move, a window longer than the shortest day."""
     parameters = _with_section("backtest", change)
 
+    _assert_only_error(parameters, message)
+
+
+def _with_morning_report(change: dict[str, Any]) -> dict[str, Any]:
+    """The real parameters with `change` applied to interpretability.morning_report."""
+    morning_report = _project_parameters()["interpretability"]["morning_report"]
+    return _with_section("interpretability", {"morning_report": {**morning_report, **change}})
+
+
+@pytest.mark.parametrize(
+    ("parameters", "message"),
+    [
+        (
+            _with_section("interpretability", {"regime_names": ["low", "medium", "high"]}),
+            "same \\['regime_names'\\]",
+        ),
+        (
+            _with_section("interpretability", {"method_check_background_rows": 200}),
+            "less than or equal to 100",
+        ),
+        (_with_morning_report({"decision_day": "2030-01-01"}), "must fall from start_date"),
+        (
+            _with_morning_report({"drivers": {"day": "features", "hour": "feature"}}),
+            "Input should be 'feature' or 'family'",
+        ),
+    ],
+)
+def test_inconsistent_interpretability_section_is_rejected(
+    parameters: dict[str, Any], message: str
+) -> None:
+    """Other regimes than the models explained, more background rows than shap uses, a
+    decision day outside the data, a driver level that does not exist."""
     _assert_only_error(parameters, message)

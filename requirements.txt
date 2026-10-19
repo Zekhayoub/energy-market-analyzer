@@ -2,7 +2,8 @@
 
 # === Framework ===
 kedro==0.19.15
-kedro-datasets[pandas-parquetdataset,json-jsondataset,pickle-pickledataset]==7.0.0
+# text-textdataset: the Markdown view of the morning report.
+kedro-datasets[pandas-parquetdataset,json-jsondataset,pickle-pickledataset,text-textdataset]==7.0.0
 # Kedro 0.19 calls an omegaconf API deprecated in 2.4: 2.3 keeps the logs free of warnings.
 omegaconf==2.3.0
 ipython==9.17.1
@@ -32,6 +33,8 @@ xgboost==3.4.1
 lightgbm==4.7.0
 statsmodels==0.14.6
 scipy==1.18.1
+# SHAP values come from XGBoost itself (pred_contribs, identical TreeSHAP); shap gives the
+# interventional check of the attribution method and the figures of notebook 4.
 shap==0.54.1
 
 # === Visualization ===
