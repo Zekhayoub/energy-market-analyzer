@@ -61,6 +61,10 @@ MEDIAN = 0.5
 SHORTEST_DAY_HOURS = 23
 # A test needs at least two points on the tree curve (rule 3 of run 5).
 MIN_TREE_CHECKPOINTS = 2
+# Backtest: a shift stays inside the delivered day; with a maximum power equal to the
+# average, no hour could take more energy and nothing could move.
+MAX_FLEXIBILITY_WINDOW_HOURS = SHORTEST_DAY_HOURS - 1
+MIN_FLEXIBLE_POWER_FACTOR = 1.0
 
 
 # ==================================================
@@ -546,6 +550,58 @@ class PredictionConfig(StrictModel):
         return self
 
 
+class BacktestConfig(StrictModel):
+    """Validates the `backtest` section of parameters.yml (client assumptions of D31)."""
+
+    market_timezone: str
+    holdout_start: date
+    regime_names: list[str] = Field(..., min_length=MIN_REGIME_STATES)
+    significance: float = Field(..., gt=0, lt=MEDIAN)
+    min_dm_lag_days: int = Field(..., ge=1)
+    cheapest_hours: int = Field(..., ge=1)
+    most_expensive_hours: int = Field(..., ge=1)
+    annual_consumption_mwh: float = Field(..., gt=0)
+    flexible_share: float = Field(..., gt=0, le=1)
+    flexibility_window_hours: int = Field(..., ge=1, le=MAX_FLEXIBILITY_WINDOW_HOURS)
+    max_flexible_power_factor: float = Field(..., gt=MIN_FLEXIBLE_POWER_FACTOR)
+    shift_cost_eur_mwh: float = Field(..., ge=0)
+    shift_cost_levels_eur_mwh: list[float] = Field(..., min_length=1)
+    project_cost_eur: float = Field(..., gt=0)
+    worst_days: int = Field(..., ge=1)
+
+    @field_validator("market_timezone")
+    @classmethod
+    def timezone_exists(cls, value: str) -> str:
+        """Reject a time zone name that the tz database does not know."""
+        return _known_timezone(value)
+
+    @field_validator("shift_cost_levels_eur_mwh")
+    @classmethod
+    def levels_are_costs(cls, value: list[float]) -> list[float]:
+        """Each level is a cost (0 or more) and appears once."""
+        negative_levels = [level for level in value if level < 0]
+        if negative_levels:
+            raise ValueError(f"shift_cost_levels_eur_mwh must be 0 or more: {negative_levels}")
+        if len(set(value)) < len(value):
+            raise ValueError(f"shift_cost_levels_eur_mwh lists a level twice: {value}")
+        return value
+
+    @model_validator(mode="after")
+    def settings_agree(self) -> BacktestConfig:
+        """The daily table is computed at a level of the list; ranks fit in the shortest day."""
+        if self.shift_cost_eur_mwh not in self.shift_cost_levels_eur_mwh:
+            raise ValueError(
+                f"shift_cost_levels_eur_mwh must include shift_cost_eur_mwh "
+                f"({self.shift_cost_eur_mwh})"
+            )
+        if self.cheapest_hours + self.most_expensive_hours > SHORTEST_DAY_HOURS:
+            raise ValueError(
+                f"cheapest_hours + most_expensive_hours must fit in a day of "
+                f"{SHORTEST_DAY_HOURS} hours"
+            )
+        return self
+
+
 class ProjectConfig(StrictModel):
     """All parameter sections. Each pipeline adds its own field in its commit."""
 
@@ -554,6 +610,7 @@ class ProjectConfig(StrictModel):
     regime: RegimeConfig
     anomaly: AnomalyConfig
     prediction: PredictionConfig
+    backtest: BacktestConfig
 
     @model_validator(mode="after")
     def sections_agree(self) -> ProjectConfig:
@@ -562,6 +619,7 @@ class ProjectConfig(StrictModel):
         _regime_agrees(self.ingestion, self.features, self.regime)
         _anomaly_agrees(self.ingestion, self.regime, self.anomaly)
         _prediction_agrees(self.ingestion, self.regime, self.prediction)
+        _backtest_agrees(self.prediction, self.backtest)
         return self
 
 
@@ -657,6 +715,26 @@ def _prediction_agrees(
             raise ValueError(
                 f"development_epochs must start after the first tested month: {epochs[0]}"
             )
+
+
+def _backtest_agrees(prediction: PredictionConfig, backtest: BacktestConfig) -> None:
+    """The backtest reads the prediction tables: same time zone, reserved period, regimes,
+    test and ranks of the hours (it checks the published alerts against the predictions)."""
+    shared = {
+        "market_timezone": (backtest.market_timezone, prediction.market_timezone),
+        "holdout_start": (backtest.holdout_start, prediction.holdout_start),
+        "regime_names": (backtest.regime_names, prediction.regime_names),
+        "significance": (backtest.significance, prediction.significance),
+        "min_dm_lag_days": (backtest.min_dm_lag_days, prediction.min_dm_lag_days),
+        "cheapest_hours": (backtest.cheapest_hours, prediction.alerts.cheapest_hours),
+        "most_expensive_hours": (
+            backtest.most_expensive_hours,
+            prediction.alerts.most_expensive_hours,
+        ),
+    }
+    different = [name for name, (ours, theirs) in shared.items() if ours != theirs]
+    if different:
+        raise ValueError(f"backtest and prediction must use the same {different}")
 
 
 def _months_between(start: date, end: date) -> int:

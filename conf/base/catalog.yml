@@ -107,6 +107,12 @@ alerts:
   type: pandas.ParquetDataset
   filepath: data/07_model_output/alerts.parquet
 
+# Backtest: one row per delivered day evaluated. Savings (EUR) and energy moved
+# (MWh) of each strategy, decided at 11:00 the day before, at the configured shift cost.
+backtest_daily:
+  type: pandas.ParquetDataset
+  filepath: data/07_model_output/backtest_daily.parquet
+
 
 # === 08_reporting ===
 
@@ -129,3 +135,7 @@ anomaly_report:
 prediction_report:
   type: json.JSONDataset
   filepath: data/08_reporting/prediction_report.json
+
+backtest_report:
+  type: json.JSONDataset
+  filepath: data/08_reporting/backtest_report.json

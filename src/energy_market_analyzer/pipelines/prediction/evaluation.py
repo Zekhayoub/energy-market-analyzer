@@ -198,6 +198,19 @@ def newey_west_lag(days: int, params: dict[str, Any]) -> int:
     return max(params["min_dm_lag_days"], int(rule_of_thumb))
 
 
+def long_run_variance(values: np.ndarray, lag: int) -> float:
+    """Newey-West long-run variance of daily values (Bartlett weights up to `lag` days).
+
+    Days close in time are correlated: the variance of their mean is larger than
+    the plain variance divided by the number of days.
+    """
+    days = len(values)
+    centred = values - values.mean()
+    autocovariances = [centred[k:] @ centred[: days - k] / days for k in range(lag + 1)]
+    bartlett = [1.0 - k / (lag + 1) for k in range(1, lag + 1)]
+    return float(autocovariances[0] + 2 * float(np.dot(bartlett, autocovariances[1:])))
+
+
 def diebold_mariano(differential: pd.Series, params: dict[str, Any]) -> dict[str, Any]:
     """Diebold-Mariano test that the mean daily loss difference is zero (two-sided).
 
@@ -211,13 +224,10 @@ def diebold_mariano(differential: pd.Series, params: dict[str, Any]) -> dict[str
     result = {"days": days, "mean_difference": rounded(values.mean()) if days else None}
     if days <= lag + 1:
         return {**result, "statistic": None, "p_value": None, "lag_days": lag}
-    centred = values - values.mean()
-    autocovariances = [centred[k:] @ centred[: days - k] / days for k in range(lag + 1)]
-    bartlett = [1.0 - k / (lag + 1) for k in range(1, lag + 1)]
-    long_run_variance = autocovariances[0] + 2 * float(np.dot(bartlett, autocovariances[1:]))
-    if long_run_variance <= 0:
+    variance = long_run_variance(values, lag)
+    if variance <= 0:
         return {**result, "statistic": None, "p_value": None, "lag_days": lag}
-    statistic = values.mean() / math.sqrt(long_run_variance / days)
+    statistic = values.mean() / math.sqrt(variance / days)
     p_value = math.erfc(abs(statistic) / math.sqrt(2.0))
     return {
         **result,

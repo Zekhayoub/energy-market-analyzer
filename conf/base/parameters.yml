@@ -350,3 +350,43 @@ prediction:
 
   # Worst days listed in the residuals of the report, per period.
   worst_days: 10
+
+
+# --- Backtest ---
+# Hour-by-hour savings of an industrial client that moves part of its consumption
+# within the delivered day (decisions D31 and D32). At 11:00 J the client fixes the
+# hourly schedule of J+1 from the predicted prices (its day-ahead bids close at
+# 12:00), then pays the realized prices. The client assumptions are business
+# choices written before run 6, never tuned on its results.
+backtest:
+  market_timezone: ${globals:market_timezone}
+  holdout_start: ${globals:holdout_start}
+  regime_names: ${regime.regime_names}
+  # Same test as the prediction report: Diebold-Mariano on daily values, with a
+  # Newey-West variance (lag of at least a week).
+  significance: ${prediction.significance}
+  min_dm_lag_days: ${prediction.min_dm_lag_days}
+  # Cheapest and most expensive hours of a day, as in the published alerts.
+  cheapest_hours: ${prediction.alerts.cheapest_hours}
+  most_expensive_hours: ${prediction.alerts.most_expensive_hours}
+
+  # Client: flat consumption over the year (11.4 MW on average). Each MWh of the
+  # flexible share can be consumed up to flexibility_window_hours earlier or later,
+  # within the delivered day, without the flexible equipment exceeding
+  # max_flexible_power_factor x its average power (without that limit, all the
+  # energy would go to the single cheapest hour).
+  annual_consumption_mwh: 100000
+  flexible_share: 0.10
+  flexibility_window_hours: 4
+  max_flexible_power_factor: 2.0
+
+  # Cost of moving one MWh (staff, ramps): the client moves nothing for a smaller
+  # predicted gain. The report also gives the savings at each level of the list.
+  shift_cost_eur_mwh: 5.0
+  shift_cost_levels_eur_mwh: [0.0, 5.0, 10.0]
+
+  # Cost of the project, for its payback time.
+  project_cost_eur: 30000
+
+  # Days where the selected schedule loses the most, listed in the report, per period.
+  worst_days: 10

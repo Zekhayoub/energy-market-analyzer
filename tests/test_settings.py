@@ -53,6 +53,9 @@ def test_project_parameters_are_valid() -> None:
     assert config.prediction.regime_names == config.regime.regime_names
     assert config.prediction.holdout_start == config.features.holdout_start
     assert config.prediction.training_window_months in config.prediction.window_candidates_months
+    assert config.backtest.holdout_start == config.features.holdout_start
+    assert config.backtest.cheapest_hours == config.prediction.alerts.cheapest_hours
+    assert config.backtest.shift_cost_eur_mwh in config.backtest.shift_cost_levels_eur_mwh
 
 
 def test_unknown_parameter_is_rejected() -> None:
@@ -144,5 +147,22 @@ def test_inconsistent_prediction_section_is_rejected(
     """Other regimes, unordered epochs, an unreported calibration window, a confidence no
     alert can reach, a tree curve without two points."""
     parameters = _with_prediction_setting(group, change)
+
+    _assert_only_error(parameters, message)
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"cheapest_hours": 6}, "same \\['cheapest_hours'\\]"),
+        ({"shift_cost_eur_mwh": 7.0}, "must include shift_cost_eur_mwh \\(7.0\\)"),
+        ({"max_flexible_power_factor": 1.0}, "greater than 1"),
+        ({"flexibility_window_hours": 24}, "less than or equal to 22"),
+    ],
+)
+def test_inconsistent_backtest_section_is_rejected(change: dict[str, Any], message: str) -> None:
+    """Other hour counts than the published alerts, a shift cost without its sensitivity, a
+    maximum power at which nothing can move, a window longer than the shortest day."""
+    parameters = _with_section("backtest", change)
 
     _assert_only_error(parameters, message)

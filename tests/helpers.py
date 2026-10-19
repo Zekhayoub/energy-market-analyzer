@@ -14,8 +14,10 @@ import pandas as pd
 from energy_market_analyzer.pipelines.features.nodes import (
     CLEAN_SPARK_SPREAD,
     DAY,
+    DECISION_DAY,
     PRICE_CHANGE,
     RESIDUAL_LOAD,
+    TARGET_PRICE,
     build_daily_market,
     build_features_model_a,
     build_features_model_b,
@@ -36,6 +38,13 @@ from energy_market_analyzer.pipelines.ingestion.nodes import (
     delivery_period,
     flow_column,
 )
+from energy_market_analyzer.pipelines.prediction.models import (
+    NAIVE_SIMILAR_DAY,
+    SELECTED,
+    TARGET_DAY,
+    prediction_column,
+)
+from energy_market_analyzer.pipelines.prediction.nodes import daily_ranks
 from energy_market_analyzer.pipelines.regime.nodes import (
     CLEAN_SPARK_SPREAD_MEAN,
     FILTERED,
@@ -93,6 +102,15 @@ PREDICTION_HOLDOUT = "2018-09-01"
 REGIME_BLOCK_DAYS = 9
 REGIME_PROBABILITY = 0.8
 DAYS_WITHOUT_REGIME = 20
+# Backtest tests: eight months of predicted hours, both clock changes, reserved period
+# from October. Realized prices follow a daily shape; the selected prediction is closer
+# to them than the naive (EUR/MWh).
+BACKTEST_START = "2019-03-15"
+BACKTEST_END = "2019-11-15"
+BACKTEST_HOLDOUT = "2019-10-01"
+BACKTEST_PRICE = 60.0
+BACKTEST_SELECTED_NOISE = 8.0
+BACKTEST_NAIVE_NOISE = 15.0
 
 
 def make_ingestion_params(**overrides: Any) -> dict[str, Any]:
@@ -516,3 +534,76 @@ def make_prediction_market() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     features_model_b = build_features_model_b(daily_market, params)
     days = pd.date_range(PREDICTION_START, PREDICTION_END, freq="D")
     return features_model_a, features_model_b, make_filtered_regimes(days)
+
+
+def make_backtest_params(**overrides: Any) -> dict[str, Any]:
+    """Backtest parameters for tests: two shift costs and few worst days, to stay fast.
+
+    Args:
+        **overrides: Keys to replace, e.g. flexibility_window_hours=2.
+
+    Returns:
+        A dict shaped like the `backtest` section of parameters.yml.
+    """
+    base_params = {
+        "market_timezone": MARKET_TIMEZONE,
+        "holdout_start": BACKTEST_HOLDOUT,
+        "regime_names": REGIME_NAMES,
+        "significance": 0.05,
+        "min_dm_lag_days": 7,
+        "cheapest_hours": 8,
+        "most_expensive_hours": 4,
+        "annual_consumption_mwh": 100000.0,
+        "flexible_share": 0.1,
+        "flexibility_window_hours": 4,
+        "max_flexible_power_factor": 2.0,
+        "shift_cost_eur_mwh": 5.0,
+        "shift_cost_levels_eur_mwh": [0.0, 5.0],
+        "project_cost_eur": 30000.0,
+        "worst_days": 3,
+    }
+    return {**base_params, **overrides}
+
+
+def make_alerts(predictions: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+    """Cheapest and most expensive hours of the selected prediction, as the alerts publish them."""
+    counts = {
+        "cheapest_hours": params["cheapest_hours"],
+        "most_expensive_hours": params["most_expensive_hours"],
+    }
+    selected = predictions[prediction_column(SELECTED)]
+    return daily_ranks(selected, predictions[TARGET_DAY], {"alerts": counts})
+
+
+def make_backtest_market() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Hourly predictions of model A and their alerts, from BACKTEST_START to BACKTEST_END.
+
+    Returns:
+        A predictions table shaped like `predictions_model_a` (the columns the
+        backtest reads) and the alerts (rank flags of the selected prediction).
+    """
+    rng = np.random.default_rng(RANDOM_SEED)
+    first_hour = pd.Timestamp(BACKTEST_START, tz=MARKET_TIMEZONE)
+    end_hour = pd.Timestamp(BACKTEST_END, tz=MARKET_TIMEZONE) + ONE_DAY
+    local_hours = pd.date_range(first_hour, end_hour, freq="h", inclusive="left")
+    hours = local_hours.tz_convert("UTC").rename(TIMESTAMP)
+    days = market_days(hours, MARKET_TIMEZONE)
+    daily_shape = np.sin((local_hours.hour.to_numpy() - 6) / 24 * 2 * np.pi)
+    expected_price = BACKTEST_PRICE * (1 + 2 * DAILY_SHAPE_SHARE * daily_shape)
+    realized = expected_price + rng.normal(0, BACKTEST_PRICE * DAILY_SHAPE_SHARE, len(hours))
+    day_numbers = (days - days[0]).days.to_numpy()
+    labels = day_numbers // REGIME_BLOCK_DAYS % len(REGIME_NAMES)
+    selected = realized + rng.normal(0, BACKTEST_SELECTED_NOISE, len(hours))
+    naive = expected_price + rng.normal(0, BACKTEST_NAIVE_NOISE, len(hours))
+    predictions = pd.DataFrame(
+        {
+            DECISION_DAY: days - ONE_DAY,
+            TARGET_DAY: days,
+            REGIME_FILTERED: pd.array(labels, dtype=LABEL_DTYPE),
+            TARGET_PRICE: realized,
+            prediction_column(SELECTED): selected,
+            prediction_column(NAIVE_SIMILAR_DAY): naive,
+        },
+        index=hours,
+    )
+    return predictions, make_alerts(predictions, make_backtest_params())
